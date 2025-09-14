@@ -315,7 +315,7 @@ def main():
     
     args = parser.parse_args()
 
-    print("--- Hashcat Rule Extractor (Final Version) ---")
+    print("--- Hashcat Rule Extractor v.1.0 ---")
     print(f"Analyzing files: '{args.base_words}' and '{args.target_passwords}'")
     if args.chains:
         print("Mode: Chain Extraction (slower)")
