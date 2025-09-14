@@ -315,7 +315,7 @@ def main():
     
     args = parser.parse_args()
 
-    print("--- Hashcat Rule Extractor v.1.0 ---")
+    print("--- Hashcat Rule Extractor v1.0 ---")
     print(f"Analyzing files: '{args.base_words}' and '{args.target_passwords}'")
     if args.chains:
         print("Mode: Chain Extraction (slower)")
@@ -331,9 +331,6 @@ def main():
         
     target_set = set(target_passwords)
     
-    special_chars = "!@#$%^&*()_+=-"
-    hex_letters = "abcdef"
-    
     simple_rules = set()
     simple_rules.add(':')
     simple_rules.update(['l', 'u', 'c', 'C', 't', 'r', 'f', 'd', 'q', '{', '}', '[', ']', 'k', 'K', 'E'])
@@ -344,7 +341,8 @@ def main():
     
     rule_engine = RuleEngine()
     
-    chars_to_test = string.digits + hex_letters + special_chars
+    chars_to_test = string.ascii_letters + string.digits + string.punctuation
+    
     for char in chars_to_test:
         simple_rules.add(f"${char}")
         simple_rules.add(f"^{char}")
@@ -365,6 +363,7 @@ def main():
         simple_rules.add(f"z{pos}")
         simple_rules.add(f"Z{pos}")
     
+    # Generating the most common 's' rules based on a fixed dictionary
     replacements = {'a':'@', 'e':'3', 'i':'1', 'o':'0', 's':'$'}
     for k, v in replacements.items():
         simple_rules.add(f"s{k}{v}")
@@ -373,6 +372,22 @@ def main():
         for pos_b in positions:
             if pos_a != pos_b:
                 simple_rules.add(f"*{pos_a}{pos_b}")
+    
+    # Now generating the 'i' and 'o' rules based on user request
+    io_positions = ['0', '1', '2'] + ['d', 'e', 'f']
+    
+    for pos in io_positions:
+        for char_to_add in chars_to_test:
+            simple_rules.add(f"i{pos}{char_to_add}")
+            simple_rules.add(f"o{pos}{char_to_add}")
+
+    # Combine all existing rules with a 'T0' prefix
+    t0_rules = set()
+    for rule in simple_rules:
+        if rule != ':':
+            t0_rules.add(f"T0{rule}")
+
+    simple_rules.update(t0_rules)
 
     print(f"Generated a core set of {len(simple_rules)} rules for testing.")
     print("Starting rule extraction...")
