@@ -6,12 +6,23 @@ from tqdm import tqdm
 from collections import Counter
 import string
 from multiprocessing import Pool, cpu_count
+from cython.cimports.libc.stdlib import strtol
+from cython.cimports.libc.string import strlen
 
 def i36(s):
+    # This function is now just a Python wrapper, the C-optimized version is below.
     try:
         return int(s, 36)
     except (ValueError, IndexError):
         return -1
+
+cpdef int c_i36(bytes s):
+    cdef long val = 0
+    cdef char* endptr
+    val = strtol(s, &endptr, 36)
+    if endptr[0] != b'\0':
+        return -1
+    return val
 
 FUNCTS = {}
 FUNCTS[':'] = lambda x, i: x
@@ -80,7 +91,11 @@ def apostrophe(x, i):
     if n < 0 or n > len(x): return None
     return x[:n]
 FUNCTS["'"] = apostrophe
-FUNCTS['s'] = lambda x, i: x.replace(i[0], i[1]) if len(i) == 2 else None
+def s(x, i):
+    if len(i) == 2:
+        return x.replace(i[0], i[1])
+    return None
+FUNCTS['s'] = s
 FUNCTS['@'] = lambda x, i: x.replace(i, '')
 def z(x, i):
     number = i36(i)
@@ -173,14 +188,14 @@ def three(x, i):
     return separator.join(parts)
 FUNCTS['3'] = three
 
-cdef class RuleEngine:
-    cpdef apply_rule(self, str rule_str, str word):
-        cdef list parsed_rule = self._parse_rule(rule_str)
+
+class RuleEngine(object):
+    def apply_rule(self, rule_str, word):
+        parsed_rule = self._parse_rule(rule_str)
         if parsed_rule is None:
             return None
-        
-        cdef str current_word = word
-        cdef tuple function
+            
+        current_word = word
         for function in parsed_rule:
             if current_word is None:
                 return None
@@ -190,20 +205,16 @@ cdef class RuleEngine:
                 return None
         return current_word
 
-    cdef list _parse_rule(self, str rule_str):
-        cdef list rules = []
-        cdef int i = 0
-        cdef int length = len(rule_str)
-        cdef str char
-        cdef str arg1
-        cdef str arg2
-        while i < length:
+    def _parse_rule(self, rule_str):
+        rules = []
+        i = 0
+        while i < len(rule_str):
             char = rule_str[i]
             if char in "ludtrf{}qkK":
                 rules.append((char, ""))
                 i += 1
             elif char in "$^":
-                if i + 1 < length:
+                if i + 1 < len(rule_str):
                     rules.append((char, rule_str[i+1]))
                     i += 2
                 else:
@@ -215,31 +226,31 @@ cdef class RuleEngine:
                 rules.append((char, ""))
                 i += 1
             elif char in "opsx*+-.yY":
-                if i + 2 <= length:
+                if i + 2 <= len(rule_str):
                     rules.append((char, rule_str[i+1:i+3]))
                     i += 3
                 else:
                     return None
             elif char in "D'LRTZz":
-                if i + 1 < length:
+                if i + 1 < len(rule_str):
                     rules.append((char, rule_str[i+1]))
                     i += 2
                 else:
                     return None
             elif char in "@":
-                if i + 1 < length:
+                if i + 1 < len(rule_str):
                     rules.append((char, rule_str[i+1]))
                     i += 2
                 else:
                     return None
             elif char == 'e':
-                if i + 2 <= length:
+                if i + 2 <= len(rule_str):
                     rules.append((char, rule_str[i+1]))
                     i += 2
                 else:
                     return None
             elif char == '3':
-                if i + 2 <= length:
+                if i + 2 <= len(rule_str):
                     rules.append((char, rule_str[i+1:i+3]))
                     i += 3
                 else:
@@ -247,6 +258,7 @@ cdef class RuleEngine:
             else:
                 return None
         return rules
+
 
 def process_word(args):
     word, rules, target_set, rule_engine, chains_mode = args
@@ -269,7 +281,7 @@ def process_word(args):
                         
     return found_rules_local
 
-cpdef load_data(str filename):
+def load_data(filename):
     if not os.path.exists(filename):
         print(f"Error: The file '{filename}' does not exist.")
         return None
@@ -280,13 +292,12 @@ cpdef load_data(str filename):
         print(f"An error occurred while loading the file '{filename}': {e}")
         return None
 
-cpdef encode_non_ascii_to_hex(str rule):
-    cdef str hex_encoded_rule = ""
-    cdef str char
+def encode_non_ascii_to_hex(rule):
     try:
         rule.encode('ascii')
         return rule
     except UnicodeEncodeError:
+        hex_encoded_rule = ""
         for char in rule:
             if char in "ludtrf{}q[]CcE$":
                 hex_encoded_rule += char
@@ -304,7 +315,7 @@ def main():
     
     args = parser.parse_args()
 
-    print("--- Hashcat Rule Extractor ---")
+    print("--- Hashcat Rule Extractor (Final Version) ---")
     print(f"Analyzing files: '{args.base_words}' and '{args.target_passwords}'")
     if args.chains:
         print("Mode: Chain Extraction (slower)")
