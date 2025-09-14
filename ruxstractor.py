@@ -5,6 +5,7 @@ import argparse
 from tqdm import tqdm
 from collections import Counter
 import string
+from multiprocessing import Pool, cpu_count
 
 def i36(s):
     try:
@@ -178,7 +179,7 @@ class RuleEngine(object):
         parsed_rule = self._parse_rule(rule_str)
         if parsed_rule is None:
             return None
-        
+            
         current_word = word
         for function in parsed_rule:
             if current_word is None:
@@ -243,6 +244,28 @@ class RuleEngine(object):
                 return None
         return rules
 
+
+def process_word(args):
+    word, rules, target_set, rule_engine, chains_mode = args
+    found_rules_local = Counter()
+    
+    if not chains_mode:
+        for rule in rules:
+            transformed_word = rule_engine.apply_rule(rule, word)
+            if transformed_word and transformed_word != word and transformed_word in target_set:
+                found_rules_local[rule] += 1
+    else:
+        for rule1 in rules:
+            intermediate_word = rule_engine.apply_rule(rule1, word)
+            if intermediate_word:
+                for rule2 in rules:
+                    transformed_word = rule_engine.apply_rule(rule2, intermediate_word)
+                    if transformed_word and transformed_word != word and transformed_word in target_set:
+                        combined_rule = f"{rule1}{rule2}"
+                        found_rules_local[combined_rule] += 1
+                        
+    return found_rules_local
+
 def load_data(filename):
     if not os.path.exists(filename):
         print(f"Error: The file '{filename}' does not exist.")
@@ -261,7 +284,6 @@ def encode_non_ascii_to_hex(rule):
     except UnicodeEncodeError:
         hex_encoded_rule = ""
         for char in rule:
-            # Check if the character is a common Hashcat rule character
             if char in "ludtrf{}q[]CcE$":
                 hex_encoded_rule += char
             else:
@@ -293,7 +315,6 @@ def main():
         return
         
     target_set = set(target_passwords)
-    found_rules = Counter()
     
     special_chars = "!@#$%^&*()_+=-"
     hex_letters = "abcdef"
@@ -308,13 +329,11 @@ def main():
     
     rule_engine = RuleEngine()
     
-    # Generate rules with a character argument
     chars_to_test = string.digits + hex_letters + special_chars
     for char in chars_to_test:
         simple_rules.add(f"${char}")
         simple_rules.add(f"^{char}")
         
-    # Generate rules with a number argument (up to pos 15)
     positions = [str(i) for i in range(16)]
     for pos in positions:
         simple_rules.add(f"T{pos}")
@@ -331,7 +350,6 @@ def main():
         simple_rules.add(f"z{pos}")
         simple_rules.add(f"Z{pos}")
     
-    # Generate rules with multiple arguments
     replacements = {'a':'@', 'e':'3', 'i':'1', 'o':'0', 's':'$'}
     for k, v in replacements.items():
         simple_rules.add(f"s{k}{v}")
@@ -343,39 +361,19 @@ def main():
 
     print(f"Generated a core set of {len(simple_rules)} rules for testing.")
     print("Starting rule extraction...")
+
+    task_args = [(word, list(simple_rules), target_set, rule_engine, args.chains) for word in base_words]
     
-    if not args.chains:
-        total_combinations = len(base_words) * len(simple_rules)
-        pbar = tqdm(total=total_combinations, desc="Processing")
+    found_rules = Counter()
+    
+    num_processes = cpu_count()
+    print(f"Using {num_processes} processes for parallel processing.")
+    
+    with Pool(processes=num_processes) as p:
+        results = p.imap_unordered(process_word, task_args, chunksize=100)
         
-        for word in base_words:
-            for rule in simple_rules:
-                transformed_word = rule_engine.apply_rule(rule, word)
-                
-                if transformed_word and transformed_word != word and transformed_word in target_set:
-                    found_rules[rule] += 1
-                
-                pbar.update(1)
-        pbar.close()
-
-    else:
-        total_combinations = len(base_words) * len(simple_rules)**2
-        pbar = tqdm(total=total_combinations, desc="Processing chains")
-
-        for word in base_words:
-            for rule1 in simple_rules:
-                intermediate_word = rule_engine.apply_rule(rule1, word)
-
-                if intermediate_word:
-                    for rule2 in simple_rules:
-                        transformed_word = rule_engine.apply_rule(rule2, intermediate_word)
-
-                        if transformed_word and transformed_word != word and transformed_word in target_set:
-                            combined_rule = f"{rule1}{rule2}"
-                            found_rules[combined_rule] += 1
-                        
-                pbar.update(len(simple_rules))
-        pbar.close()
+        for result in tqdm(results, total=len(base_words), desc="Processing words"):
+            found_rules.update(result)
 
     print("-----------------------------")
     if not found_rules:
