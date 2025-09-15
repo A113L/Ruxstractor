@@ -437,15 +437,19 @@ def format_time(seconds):
 
 def main():
     parser = argparse.ArgumentParser(description='Hashcat rule extractor based on example passwords.')
-    parser.add_argument('-b', '--base-words', required=True, help='Path to the file with base words.')
+    parser.add_argument('-b', '--base-words', help='Path to the file with base words (required unless --autobase is used).')
     parser.add_argument('-t', '--target-passwords', required=True, help='Path to the file with target passwords.')
     parser.add_argument('-o', '--output-file', default='extracted_rules.rule', help='Path to the output file for the rules. Default: extracted_rules.rule')
     parser.add_argument('--chains', action='store_true', help='Enable rule chain extraction (slower, but finds more rules).')
+    parser.add_argument('--autobase', action='store_true', help='Automatically generate base words from the target list (memory-intensive).')
     
     args = parser.parse_args()
 
-    print("--- Hashcat Rule Extractor v1.1 ---")
+    print("--- Hashcat Rule Extractor v1.2 ---")
     print(f"Analyzing files: '{args.base_words}' and '{args.target_passwords}'")
+    if args.autobase:
+        print("Mode: Autobase (generating base words from target list)")
+        print("Warning: The --autobase option loads the entire target file into RAM. It will consume a large amount of memory on larger files.")
     if args.chains:
         print("Mode: Chain Extraction")
         print("Warning: This mode is intended for use with very small files due to its computational complexity.")
@@ -453,14 +457,26 @@ def main():
         print("Mode: Single Rule Extraction (default)")
     print("-----------------------------------------------------")
 
-    base_words = load_data(args.base_words)
+    if not args.autobase and not args.base_words:
+        parser.error('argument -b/--base-words is required unless --autobase is specified.')
+
+    # Load target passwords first, as they are needed for both modes
     target_passwords = load_data(args.target_passwords)
-    
-    if base_words is None or target_passwords is None:
+    if target_passwords is None:
         return
-        
     target_set = set(target_passwords)
     
+    if args.autobase:
+        # Generate base_words from target_passwords in memory
+        print("Generating base words from target list...")
+        base_words = [word for word in target_passwords if word.isalpha()]
+        print(f"Generated {len(base_words)} base words.")
+    else:
+        # Load base_words from the specified file
+        base_words = load_data(args.base_words)
+        if base_words is None:
+            return
+
     print("Generating and parsing all rules once...")
     start_time = time.time()
     parsed_rules = generate_and_parse_rules()
@@ -525,10 +541,11 @@ def main():
                 hex_rule = encode_non_ascii_to_hex(rule_str)
                 f.write(f"{hex_rule}\n")
         print(f"All rules, sorted by frequency, were successfully saved to the file '{args.output_file}'.")
-        print("Tip: You may need to use the 'cleanup-rules.bin' utility from hashcat-utils to remove any rules that are incompatible with your specific version (CPU/GPU) of Hashcat.")
+        print("Tip: You may need to use the 'cleanup-rules.bin' utility from hashcat-utils to remove any rules that are incompatible with your specific version of Hashcat.")
     except IOError as e:
         print(f"An error occurred while writing to the file: {e}")
         
 if __name__ == "__main__":
     main()
+
 
