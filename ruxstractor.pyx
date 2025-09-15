@@ -10,14 +10,31 @@ import itertools
 import numpy as np
 import tempfile
 import subprocess
+import psutil
 from tqdm import tqdm
 from collections import Counter
 from multiprocessing import Pool, cpu_count
 from functools import partial
 
+# RAM monitoring settings (change if needed)
+MAX_RAM_PERCENTAGE = 90.0
+
 # The following Cython imports are used for C-level optimization.
 from cython.cimports.libc.stdlib import strtol
 from cython.cimports.libc.string import strlen
+
+def check_ram_and_exit():
+    """Checks RAM usage and terminates the process if it exceeds the threshold."""
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    ram_used_bytes = mem_info.rss
+    total_ram_bytes = psutil.virtual_memory().total
+    ram_percentage = (ram_used_bytes / total_ram_bytes) * 100
+    
+    if ram_percentage > MAX_RAM_PERCENTAGE:
+        print(f"\n[!] WARNING: RAM usage ({ram_percentage:.2f}%) exceeds the set limit ({MAX_RAM_PERCENTAGE:.1f}%).")
+        print("Terminating process to prevent system instability.")
+        os._exit(1)
 
 # This is a Python wrapper, the C-optimized version is below.
 def i36(s):
@@ -172,7 +189,7 @@ def generate_rules_from_path(str word, str password, list path):
     return "".join(simplified_rules)
 
 # This worker function is now simpler, as it just calls the core Levenshtein functions
-cpdef find_rules_worker(tuple args):
+cpdef find_levenshtein_rules_worker(tuple args):
     """
     A worker function to find rules for a given pair of words using Levenshtein.
     """
@@ -187,7 +204,7 @@ cpdef find_rules_worker(tuple args):
     if matrix[len(base), len(target)] > max_depth:
         return None
 
-    paths = levenshtein_reverse_recursive(matrix, len(base), len(target), 0, max_depth)
+    paths = levenshtein_reverse_recursive(matrix, len(base), len(target), 0, max_dist=max_depth)
     
     if not paths:
         return None
@@ -198,6 +215,109 @@ cpdef find_rules_worker(tuple args):
     rule_string = generate_rules_from_path(base, target, shortest_path)
 
     return rule_string
+
+# New worker function for append rules
+cpdef find_append_rules_worker(tuple args):
+    """
+    A worker function to find append rules ($) for a given pair of words.
+    """
+    cdef str base = args[0]
+    cdef str target = args[1]
+    
+    if target.startswith(base) and len(target) > len(base):
+        appended_chars = target[len(base):]
+        rule = "$" + "$".join(appended_chars)
+        return rule
+    
+    return None
+
+# New worker function for prepend rules
+cpdef find_prepend_rules_worker(tuple args):
+    """
+    A worker function to find prepend rules (^) for a given pair of words.
+    """
+    cdef str base = args[0]
+    cdef str target = args[1]
+    
+    if base.endswith(target) and len(base) > len(target):
+        prepended_chars = base[:-len(target)]
+        rule = "^" + "^".join(prepended_chars)
+        return rule
+    
+    return None
+
+# New worker for 'zN' rules
+cpdef find_z_rules_worker(tuple args):
+    cdef str base = args[0]
+    cdef str target = args[1]
+    if not base or not target or len(target) <= len(base):
+        return None
+    
+    cdef str first_char = base[0]
+    cdef int num_duplicated = len(target) - len(base)
+    
+    if target == first_char * num_duplicated + base:
+        return f"z{int_to_hashcat(num_duplicated)}"
+    
+    return None
+
+# New worker for 'ZN' rules
+cpdef find_Z_rules_worker(tuple args):
+    cdef str base = args[0]
+    cdef str target = args[1]
+    if not base or not target or len(target) <= len(base):
+        return None
+        
+    cdef str last_char = base[-1]
+    cdef int num_duplicated = len(target) - len(base)
+
+    if target == base + last_char * num_duplicated:
+        return f"Z{int_to_hashcat(num_duplicated)}"
+
+    return None
+
+# New worker for 'xNM' rules
+cpdef find_x_rules_worker(tuple args):
+    cdef str base = args[0]
+    cdef str target = args[1]
+    
+    cdef int len_base = len(base)
+    cdef int len_target = len(target)
+    
+    if len_target > len_base:
+        return None
+    
+    cdef int i, j
+    for i in range(len_base):
+        for j in range(len_base - i + 1):
+            if base[i:i+j] == target:
+                return f"x{int_to_hashcat(i)}{int_to_hashcat(j)}"
+
+    return None
+
+# New worker for 'oNX' rules
+cpdef find_o_rules_worker(tuple args):
+    cdef str base = args[0]
+    cdef str target = args[1]
+
+    cdef int len_base = len(base)
+    cdef int len_target = len(target)
+    cdef int diff_count = 0
+    cdef int diff_pos = -1
+
+    if len_base != len_target or len_base == 0:
+        return None
+
+    cdef int i
+    for i in range(len_base):
+        if base[i] != target[i]:
+            diff_count += 1
+            diff_pos = i
+
+    if diff_count == 1:
+        return f"o{int_to_hashcat(diff_pos)}{target[diff_pos]}"
+
+    return None
 
 # --- Rest of the script (maintained from previous version) ---
 
@@ -226,13 +346,23 @@ def p(x, i):
     if number < 0: return None
     return x*(number+1)
 FUNCTS['p'] = p
-FUNCTS['f'] = lambda x, i: x+x[::-1]
-FUNCTS['{'] = lambda x, i: x[1:]+x[0] if len(x) > 0 else x
-FUNCTS['}'] = lambda x, i: x[-1]+x[:-1] if len(x) > 0 else x
+def f(x, i):
+    return x+x[::-1]
+FUNCTS['f'] = f
+def br_open(x, i):
+    return x[1:]+x[0] if len(x) > 0 else x
+FUNCTS['{'] = br_open
+def br_close(x, i):
+    return x[-1]+x[:-1] if len(x) > 0 else x
+FUNCTS['}'] = br_close
 FUNCTS['$'] = lambda x, i: x+i
 FUNCTS['^'] = lambda x, i: i+x
-FUNCTS['['] = lambda x, i: x[1:]
-FUNCTS[']'] = lambda x, i: x[:-1]
+def br_sq_open(x, i):
+    return x[1:]
+FUNCTS['['] = br_sq_open
+def br_sq_close(x, i):
+    return x[:-1]
+FUNCTS[']'] = br_sq_close
 def D(x, i):
     number = i36(i)
     if number < 0:
@@ -277,31 +407,40 @@ def o_ovw(x, i):
 FUNCTS['o'] = o_ovw
 def apostrophe(x, i):
     n = i36(i)
-    if n < 0:
-        n += len(x) + 1
+    if n < 0: n += len(x) + 1
     if n < 0 or n > len(x):
         return None
     return x[:n]
 FUNCTS["'"] = apostrophe
-FUNCTS['s'] = lambda x, i: x.replace(i[0], i[1]) if len(i) == 2 else None
-FUNCTS['@'] = lambda x, i: x.replace(i, '')
+def s_sub(x, i):
+    if len(i) != 2: return None
+    return x.replace(i[0], i[1])
+FUNCTS['s'] = s_sub
+def at(x, i):
+    if len(i) == 0: return None
+    return x.replace(i, '')
+FUNCTS['@'] = at
 def z(x, i):
     number = i36(i)
-    return x[0]*number + x if len(x) > 0 and number >= 0 else x
+    if number < 0: return None
+    return x[0]*number + x if len(x) > 0 else x
 FUNCTS['z'] = z
 def Z(x, i):
     number = i36(i)
-    return x+x[-1]*number if len(x) > 0 and number >= 0 else x
+    if number < 0: return None
+    return x+x[-1]*number if len(x) > 0 else x
 FUNCTS['Z'] = Z
-FUNCTS['q'] = lambda x, i: ''.join([a*2 for a in x])
-def k(x,i):
+def q(x, i):
+    return ''.join([c*2 for c in x])
+FUNCTS['q'] = q
+def k_swap(x, i):
     if len(x) < 2: return x
     return x[1]+x[0]+x[2:]
-FUNCTS['k'] = k
-def K(x,i):
+FUNCTS['k'] = k_swap
+def K_swap(x, i):
     if len(x) < 2: return x
     return x[:-2]+x[-1]+x[-2]
-FUNCTS['K'] = K
+FUNCTS['K'] = K_swap
 def star(x, i):
     if len(i) != 2: return None
     n = i36(i[0])
@@ -372,13 +511,13 @@ def Y(x, i):
         return None
     return x + x[-n:]
 FUNCTS['Y'] = Y
-def E(x, i):
+def E_title(x, i):
     return string.capwords(x, ' ')
-FUNCTS['E'] = E
-def e(x, i):
+FUNCTS['E'] = E_title
+def e_title_sep(x, i):
     if len(i) != 1: return None
     return string.capwords(x, i)
-FUNCTS['e'] = e
+FUNCTS['e'] = e_title_sep
 def three(x, i):
     if len(i) < 2: return None
     n = i36(i[0])
@@ -505,28 +644,22 @@ cpdef encode_non_ascii_to_hex(str rule):
                 hex_encoded_rule += "".join([f"\\x{byte:02x}" for byte in char.encode('latin-1')])
         return hex_encoded_rule
 
-def generate_tasks_to_file(temp_tasks_path, base_words, target_passwords, start_depth, end_depth, autobase):
+def generate_levenshtein_tasks_to_file(temp_tasks_path, base_words, target_file, start_depth, end_depth):
     total_tasks = 0
     with open(temp_tasks_path, 'w', encoding='utf-8') as f:
-        if autobase:
-            base_set = set([word for word in target_passwords if word.isalpha()])
-            target_set = set(target_passwords)
+        with open(target_file, 'r', encoding='latin-1') as f_target:
             for depth in range(start_depth, end_depth + 1):
-                for base, target in itertools.permutations(base_set, 2):
-                    if base != target:
-                        f.write(f"{base}\t{target}\t{depth}\n")
-                        total_tasks += 1
-        else:
-            base_set = set(base_words)
-            target_set = set(target_passwords)
-            for depth in range(start_depth, end_depth + 1):
-                for base, target in itertools.product(base_set, target_set):
-                    if base != target:
-                        f.write(f"{base}\t{target}\t{depth}\n")
-                        total_tasks += 1
+                f_target.seek(0) # Reset file pointer for each depth
+                for target in f_target:
+                    target = target.strip()
+                    if target:
+                        for base in base_words:
+                            if base != target:
+                                f.write(f"{base}\t{target}\t{depth}\n")
+                                total_tasks += 1
     return total_tasks
 
-def task_generator(temp_tasks_path):
+def levenshtein_task_generator(temp_tasks_path):
     with open(temp_tasks_path, 'r', encoding='utf-8') as f:
         for line in f:
             parts = line.strip().split('\t')
@@ -549,19 +682,12 @@ def main():
     parser.add_argument('-o', '--output-file', default='extracted_rules.rule', help='Path to the output file for the rules. Default: extracted_rules.rule')
     parser.add_argument('--depth-range', default='1-1', help='Range of Levenshtein distances to find rules for, e.g., "1-5". Default: "1-1"')
     parser.add_argument('--autobase', action='store_true', help='Automatically generate base words from the target list (memory-intensive).')
-    parser.add_argument('--in-memory', action='store_true', help='Use RAM for all processing. Faster for small datasets but memory-intensive.')
+    parser.add_argument('--in-ram', action='store_true', help='Use RAM for all processing. Faster but may consume a lot of RAM.')
     parser.add_argument('--cleanup-tool', help='Path to cleanup-rules.bin to post-process the rules.')
-    parser.add_argument('--cleaned-output', help='File to save the cleaned rules to. Requires --cleanup-tool.')
     
     args = parser.parse_args()
 
-    print("--- Hashcat Rule Extractor ---")
-    
-    if args.autobase:
-        print("Mode: Autobase (generating base words from the target list)")
-        print("WARNING: The --autobase option still loads the target file into RAM initially.")
-    
-    # Parse the depth range
+    # Parse the depth range first, as it's used in print statements
     try:
         depth_parts = args.depth_range.split('-')
         if len(depth_parts) != 2:
@@ -574,105 +700,165 @@ def main():
         print(f"Error parsing --depth-range: {e}")
         sys.exit(1)
 
-    print(f"Mode: Levenshtein Rule Extraction (Depth Range: {start_depth}-{end_depth})")
-    
-    if args.in_memory:
-        print("Using memory-intensive mode (--in-memory). This is faster but may consume a lot of RAM.")
-    else:
-        print("Using file-based mode (default). This is slower but very low on RAM usage.")
+    print("--- Hashcat Rule Extractor ---")
+    check_ram_and_exit()
 
-    print("-----------------------------------------------------")
-
+    # Check if a dedicated base words file is provided
     if not args.autobase and not args.base_words:
         parser.error('argument -b/--base-words is required unless --autobase is specified.')
 
     base_words = None
-    if not args.autobase:
-        base_words = load_data(args.base_words)
-        if base_words is None: return
-
-    target_passwords = load_data(args.target_passwords)
-    if target_passwords is None: return
-        
-    print(f"Loaded {len(base_words) if base_words else 'N/A'} base words.")
-    print(f"Loaded {len(target_passwords)} target passwords.")
+    target_passwords = None
+    temp_base_path = None
     
+    # Determine processing mode and load base words
+    # The condition was changed so that the --in-ram flag always forces in-memory mode,
+    # regardless of file size
+    if args.in_ram:
+        print("Using memory-intensive mode (--in-ram). This is faster but may consume a lot of RAM.")
+        check_ram_and_exit()
+        target_passwords = load_data(args.target_passwords)
+        if target_passwords is None: return
+        print(f"Loaded {len(target_passwords)} target passwords.")
+        if args.autobase:
+            base_words = [word for word in target_passwords if word.isalpha()]
+            print("Mode: Autobase (generating base words from the target list)")
+            print(f"Loaded {len(base_words)} base words.")
+        else:
+            base_words = load_data(args.base_words)
+            if base_words is None: return
+            print(f"Loaded {len(base_words)} base words.")
+            
+    else: # File-based mode (default)
+        print("Using file-based mode (default). This is slower but very low on RAM usage.")
+        
+        # In file-based mode, the base list is loaded into memory, but the target list is streamed
+        if args.autobase:
+            print("Mode: Autobase (generating base words from the target list)")
+            # In file-based mode, we need to create a temporary file for base words
+            if not os.path.exists(args.target_passwords):
+                print(f"Error: The target file '{args.target_passwords}' does not exist.")
+                return
+            with open(args.target_passwords, 'r', encoding='latin-1') as f_target, \
+                    tempfile.NamedTemporaryFile(mode='w+', encoding='utf-8', delete=False) as temp_base_file_obj:
+                temp_base_path = temp_base_file_obj.name
+                for word in f_target:
+                    word = word.strip()
+                    if word and word.isalpha():
+                        temp_base_file_obj.write(word + '\n')
+            base_words = load_data(temp_base_path)
+            if base_words is None: return
+            print(f"Loaded {len(base_words)} auto-generated base words to a temporary file.")
+        else:
+            base_words = load_data(args.base_words)
+            if base_words is None: return
+            print(f"Loaded {len(base_words)} base words.")
+        
+        print(f"Target passwords file will be processed in a memory-optimized way.")
+    
+    print(f"Mode: Levenshtein Rule Extraction (Depth Range: {start_depth}-{end_depth})")
+    print("-----------------------------------------------------")
+    
+    if not base_words:
+        print("Error: No base words found. Cannot proceed.")
+        return
+        
     found_rules = Counter()
     total_tasks = 0
-
-    if args.in_memory:
+    num_processes = cpu_count()
+    print(f"Using {num_processes} processes for parallel processing.")
+    
+    if args.in_ram:
         # --- Memory-intensive mode ---
+        check_ram_and_exit()
         
-        print("Generating tasks in RAM...")
-        tasks = []
+        # Non-Levenshtein rules
+        word_pairs = []
+        if args.autobase:
+            word_pairs.extend(list(itertools.permutations(set(base_words), 2)))
+        else:
+            word_pairs.extend(list(itertools.product(set(base_words), set(target_passwords))))
+            
+        print("Finding non-Levenshtein special rules...")
+        with Pool(processes=num_processes) as p:
+            check_ram_and_exit()
+            results = p.imap_unordered(find_append_rules_worker, word_pairs, chunksize=100)
+            for rule in tqdm(results, total=len(word_pairs), desc="Finding append ($) rules"):
+                if rule: found_rules[rule] += 1
+            check_ram_and_exit()
+            results = p.imap_unordered(find_prepend_rules_worker, word_pairs, chunksize=100)
+            for rule in tqdm(results, total=len(word_pairs), desc="Finding prepend (^) rules"):
+                if rule: found_rules[rule] += 1
+            check_ram_and_exit()
+            results = p.imap_unordered(find_z_rules_worker, word_pairs, chunksize=100)
+            for rule in tqdm(results, total=len(word_pairs), desc="Finding duplicate first char (z) rules"):
+                if rule: found_rules[rule] += 1
+            check_ram_and_exit()
+            results = p.imap_unordered(find_Z_rules_worker, word_pairs, chunksize=100)
+            for rule in tqdm(results, total=len(word_pairs), desc="Finding duplicate last char (Z) rules"):
+                if rule: found_rules[rule] += 1
+            check_ram_and_exit()
+            results = p.imap_unordered(find_x_rules_worker, word_pairs, chunksize=100)
+            for rule in tqdm(results, total=len(word_pairs), desc="Finding extract range (x) rules"):
+                if rule: found_rules[rule] += 1
+            check_ram_and_exit()
+            results = p.imap_unordered(find_o_rules_worker, word_pairs, chunksize=100)
+            for rule in tqdm(results, total=len(word_pairs), desc="Finding overwrite (o) rules"):
+                if rule: found_rules[rule] += 1
+        
+        # Levenshtein rules
+        print("\nGenerating Levenshtein tasks in RAM...")
+        levenshtein_tasks = []
         for depth in range(start_depth, end_depth + 1):
             if args.autobase:
-                base_set = set([word for word in target_passwords if word.isalpha()])
-                target_set = set(target_passwords)
-                tasks.extend([(base, target, depth)
-                              for base, target in itertools.permutations(base_set, 2)
-                              if base != target])
+                levenshtein_tasks.extend([(base, target, depth)
+                                          for base, target in itertools.permutations(base_words, 2)
+                                          if base != target])
             else:
-                base_set = set(base_words)
-                target_set = set(target_passwords)
-                tasks.extend([(base, target, depth)
-                              for base, target in itertools.product(base_set, target_set)
-                              if base != target])
-        total_tasks = len(tasks)
-        print(f"Total tasks to process: {total_tasks}")
-
-        print("Starting rule extraction...")
-        num_processes = cpu_count()
-        print(f"Using {num_processes} processes for parallel processing.")
+                levenshtein_tasks.extend([(base, target, depth)
+                                          for base, target in itertools.product(base_words, target_passwords)
+                                          if base != target])
+        total_tasks = len(levenshtein_tasks)
+        print(f"Total Levenshtein tasks to process: {total_tasks}")
         
+        check_ram_and_exit()
         with Pool(processes=num_processes) as p:
-            results = p.imap_unordered(find_rules_worker, tasks, chunksize=100)
-            
-            for result in tqdm(results, total=total_tasks, desc="Processing words"):
+            results = p.imap_unordered(find_levenshtein_rules_worker, levenshtein_tasks, chunksize=100)
+            for result in tqdm(results, total=total_tasks, desc="Processing Levenshtein"):
                 if result:
                     found_rules[result] += 1
 
     else:
         # --- File-based, memory-optimized mode ---
         
-        # Temporary files for inter-process communication
-        temp_tasks_path = 'rux_tasks.tmp'
-        temp_rules_path = 'rux_rules.tmp'
+        temp_tasks_path = 'rux_levenshtein_tasks.tmp'
+        temp_rules_path = 'rux_levenshtein_rules.tmp'
         
         try:
-            # Step 1: Generate tasks and save them to a file
-            print("Generating tasks and saving to a temporary file...")
-            total_tasks = generate_tasks_to_file(temp_tasks_path, base_words, target_passwords, start_depth, end_depth, args.autobase)
-            print(f"Total tasks to process: {total_tasks}")
-            
-            # Step 2: Use multiprocessing pool to process tasks from the file
-            print("Starting rule extraction...")
-            num_processes = cpu_count()
-            print(f"Using {num_processes} processes for parallel processing.")
-            
+            print("\nGenerating Levenshtein tasks and saving to a temporary file...")
+            total_tasks = generate_levenshtein_tasks_to_file(temp_tasks_path, base_words, args.target_passwords, start_depth, end_depth)
+            print(f"Total Levenshtein tasks to process: {total_tasks}")
+
             with Pool(processes=num_processes) as p, open(temp_rules_path, 'w', encoding='utf-8') as f_rules:
-                task_gen = task_generator(temp_tasks_path)
-                results = p.imap_unordered(find_rules_worker, task_gen, chunksize=100)
-                
-                for result in tqdm(results, total=total_tasks, desc="Processing words"):
+                task_gen = levenshtein_task_generator(temp_tasks_path)
+                results = p.imap_unordered(find_levenshtein_rules_worker, task_gen, chunksize=100)
+                for result in tqdm(results, total=total_tasks, desc="Processing Levenshtein"):
                     if result:
                         f_rules.write(result + '\n')
                 
-            # Step 3: Count rules from the temporary file
-            print("Processing complete. Counting and simplifying rules...")
-            found_rules = count_rules_from_file(temp_rules_path)
+            print("Processing complete. Counting and simplifying Levenshtein rules...")
+            levenshtein_rules = count_rules_from_file(temp_rules_path)
+            found_rules.update(levenshtein_rules)
 
         finally:
-            # Clean up temporary files
-            if os.path.exists(temp_tasks_path):
-                os.remove(temp_tasks_path)
-            if os.path.exists(temp_rules_path):
-                os.remove(temp_rules_path)
+            if os.path.exists(temp_tasks_path): os.remove(temp_tasks_path)
+            if os.path.exists(temp_rules_path): os.remove(temp_rules_path)
             print("Temporary files cleaned up.")
 
-    print("-----------------------------")
+    print("\n-----------------------------")
     if not found_rules:
         print("No matching rules found.")
+        if temp_base_path and os.path.exists(temp_base_path): os.remove(temp_base_path)
         return
     
     print(f"Found {len(found_rules)} unique rules.")
@@ -686,31 +872,39 @@ def main():
     
     print("\n-----------------------------")
 
-    # Step to save the extracted rules
-    try:
-        with open(args.output_file, 'w', encoding='utf-8') as f:
-            for rule, count in simplified_rules.most_common():
-                hex_rule = encode_non_ascii_to_hex(rule)
-                f.write(f"{hex_rule}\n")
-        print(f"All simplified rules were successfully saved to the file '{args.output_file}'.")
-    except IOError as e:
-        print(f"An error occurred while writing to the file: {e}")
-        
-    # New section: Post-process with cleanup-rules.bin
-    if args.cleanup_tool and args.cleaned_output:
-        print("\n--- Running cleanup-rules.bin for GPU compatibility ---")
-        input_file = args.output_file
-        output_file = args.cleaned_output
+    if args.cleanup_tool:
         try:
-            with open(input_file, 'r', encoding='utf-8') as infile, open(output_file, 'w', encoding='utf-8') as outfile:
+            with tempfile.NamedTemporaryFile(mode='w+', encoding='utf-8', delete=False) as temp_file:
+                for rule, count in simplified_rules.most_common():
+                    hex_rule = encode_non_ascii_to_hex(rule)
+                    temp_file.write(f"{hex_rule}\n")
+            
+            print(f"Running cleanup tool and saving to '{args.output_file}'...")
+            with open(temp_file.name, 'r', encoding='utf-8') as infile, open(args.output_file, 'w', encoding='utf-8') as outfile:
                 subprocess.run([args.cleanup_tool, '2'], stdin=infile, stdout=outfile, check=True)
-            print(f"Successfully cleaned rules and saved to '{output_file}'.")
+            print(f"Successfully cleaned rules and saved to '{args.output_file}'.")
+            
         except FileNotFoundError:
-            print(f"Error: The cleanup tool '{args.cleanup_tool}' was not found. Please check the path.")
+            print(f"Error: The cleanup tool '{args.cleanup_tool}' was not found.")
         except subprocess.CalledProcessError as e:
             print(f"Error: The cleanup tool '{args.cleanup_tool}' failed with exit code {e.returncode}.")
         except Exception as e:
             print(f"An unexpected error occurred during cleanup: {e}")
+        finally:
+            if 'temp_file' in locals() and os.path.exists(temp_file.name): os.remove(temp_file.name)
+    else:
+        try:
+            with open(args.output_file, 'w', encoding='utf-8') as f:
+                for rule, count in simplified_rules.most_common():
+                    hex_rule = encode_non_ascii_to_hex(rule)
+                    f.write(f"{hex_rule}\n")
+            print(f"All simplified rules were successfully saved to the file '{args.output_file}'.")
+        except IOError as e:
+            print(f"An error occurred while writing to the file: {e}")
         
+    if temp_base_path and os.path.exists(temp_base_path):
+        os.remove(temp_base_path)
+        print(f"Temporary base file '{temp_base_path}' cleaned up.")
+
 if __name__ == "__main__":
     main()
