@@ -1,24 +1,17 @@
 # distutils: extra_compile_args=-O3
 # distutils: language=c
+# distutils: extra_compile_args=-O3
+# distutils: language=c
 import os
 import argparse
 import sys
 import string
-import gzip
-import zipfile
-import io
-import time
+import itertools
+from tqdm import tqdm
 from collections import Counter
 from multiprocessing import Pool, cpu_count
 from cython.cimports.libc.stdlib import strtol
 from cython.cimports.libc.string import strlen
-
-try:
-    import py7zr
-except ImportError:
-    py7zr = None
-    print("Warning: 'py7zr' library not found. Support for .7z files is disabled.")
-    print("To enable it, run: pip install py7zr")
 
 def i36(s):
     # This function is now just a Python wrapper, the C-optimized version is below.
@@ -46,7 +39,7 @@ def C(x, i):
 FUNCTS['C'] = C
 FUNCTS['t'] = lambda x, i: x.swapcase()
 def T(x, i):
-    number = c_i36(i.encode('latin-1'))
+    number = i36(i)
     if number < 0:
         number += len(x)
     if number < 0 or number >= len(x):
@@ -56,23 +49,19 @@ FUNCTS['T'] = T
 FUNCTS['r'] = lambda x, i: x[::-1]
 FUNCTS['d'] = lambda x, i: x+x
 def p(x, i):
-    number = c_i36(i.encode('latin-1'))
+    number = i36(i)
     if number < 0: return None
     return x*(number+1)
 FUNCTS['p'] = p
 FUNCTS['f'] = lambda x, i: x+x[::-1]
 FUNCTS['{'] = lambda x, i: x[1:]+x[0] if len(x) > 0 else x
 FUNCTS['}'] = lambda x, i: x[-1]+x[:-1] if len(x) > 0 else x
-def dollar(x, i):
-    return x+i
-FUNCTS['$'] = dollar
-def caret(x, i):
-    return i+x
-FUNCTS['^'] = caret
+FUNCTS['$'] = lambda x, i: x+i
+FUNCTS['^'] = lambda x, i: i+x
 FUNCTS['['] = lambda x, i: x[1:]
 FUNCTS[']'] = lambda x, i: x[:-1]
 def D(x, i):
-    number = c_i36(i.encode('latin-1'))
+    number = i36(i)
     if number < 0:
         number += len(x)
     if number < 0 or number >= len(x):
@@ -81,21 +70,21 @@ def D(x, i):
 FUNCTS['D'] = D
 def x_ext(x, i):
     if len(i) != 2: return None
-    n = c_i36(i[0].encode('latin-1'))
-    m = c_i36(i[1].encode('latin-1'))
+    n = i36(i[0])
+    m = i36(i[1])
     if n < 0 or m < 0: return None
     return x[n:n+m]
 FUNCTS['x'] = x_ext
 def O(x, i):
     if len(i) != 2: return None
-    n = c_i36(i[0].encode('latin-1'))
-    m = c_i36(i[1].encode('latin-1'))
+    n = i36(i[0])
+    m = i36(i[1])
     if n < 0 or m < 0: return None
     return x[:n] + x[n+m:]
 FUNCTS['O'] = O
 def i_ins(x, i):
     if len(i) != 2: return None
-    n = c_i36(i[0].encode('latin-1'))
+    n = i36(i[0])
     char = i[1]
     if n < 0:
         n += len(x) + 1
@@ -105,7 +94,7 @@ def i_ins(x, i):
 FUNCTS['i'] = i_ins
 def o_ovw(x, i):
     if len(i) != 2: return None
-    n = c_i36(i[0].encode('latin-1'))
+    n = i36(i[0])
     char = i[1]
     if n < 0:
         n += len(x)
@@ -114,27 +103,21 @@ def o_ovw(x, i):
     return x[:n] + char + x[n+1:]
 FUNCTS['o'] = o_ovw
 def apostrophe(x, i):
-    n = c_i36(i.encode('latin-1'))
+    n = i36(i)
     if n < 0:
         n += len(x) + 1
     if n < 0 or n > len(x):
         return None
     return x[:n]
 FUNCTS["'"] = apostrophe
-def s(x, i):
-    if len(i) == 2:
-        return x.replace(i[0], i[1])
-    return None
-FUNCTS['s'] = s
-def at_sign(x, i):
-    return x.replace(i, '')
-FUNCTS['@'] = at_sign
+FUNCTS['s'] = lambda x, i: x.replace(i[0], i[1]) if len(i) == 2 else None
+FUNCTS['@'] = lambda x, i: x.replace(i, '')
 def z(x, i):
-    number = c_i36(i.encode('latin-1'))
+    number = i36(i)
     return x[0]*number + x if len(x) > 0 and number >= 0 else x
 FUNCTS['z'] = z
 def Z(x, i):
-    number = c_i36(i.encode('latin-1'))
+    number = i36(i)
     return x+x[-1]*number if len(x) > 0 and number >= 0 else x
 FUNCTS['Z'] = Z
 FUNCTS['q'] = lambda x, i: ''.join([a*2 for a in x])
@@ -148,8 +131,8 @@ def K(x,i):
 FUNCTS['K'] = K
 def star(x, i):
     if len(i) != 2: return None
-    n = c_i36(i[0].encode('latin-1'))
-    m = c_i36(i[1].encode('latin-1'))
+    n = i36(i[0])
+    m = i36(i[1])
     if n < 0 or m < 0: return None
     if n < 0: n += len(x)
     if m < 0: m += len(x)
@@ -159,7 +142,7 @@ def star(x, i):
     return ''.join(chars)
 FUNCTS['*'] = star
 def L(x, i):
-    n = c_i36(i.encode('latin-1'))
+    n = i36(i)
     if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
@@ -167,7 +150,7 @@ def L(x, i):
     return x[:n] + chr(shifted_val) + x[n+1:]
 FUNCTS['L'] = L
 def R(x, i):
-    n = c_i36(i.encode('latin-1'))
+    n = i36(i)
     if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
@@ -175,42 +158,42 @@ def R(x, i):
     return x[:n] + chr(shifted_val) + x[n+1:]
 FUNCTS['R'] = R
 def plus(x, i):
-    n = c_i36(i.encode('latin-1'))
+    n = i36(i)
     if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     return x[:n] + chr(char_val + 1) + x[n+1:]
 FUNCTS['+'] = plus
 def minus(x, i):
-    n = c_i36(i.encode('latin-1'))
+    n = i36(i)
     if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     return x[:n] + chr(char_val - 1) + x[n+1:]
 FUNCTS['-'] = minus
 def dot(x, i):
-    n = c_i36(i.encode('latin-1'))
+    n = i36(i)
     if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     return x[:n] + chr(char_val + 1) + x[n+1:]
 FUNCTS['.'] = dot
 def comma(x, i):
-    n = c_i36(i.encode('latin-1'))
+    n = i36(i)
     if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     return x[:n] + chr(char_val - 1) + x[n+1:]
 FUNCTS[','] = comma
 def y(x, i):
-    n = c_i36(i.encode('latin-1'))
+    n = i36(i)
     if n < 0: n += len(x) + 1
     if n < 0 or n > len(x):
         return None
     return x[:n] + x
 FUNCTS['y'] = y
 def Y(x, i):
-    n = c_i36(i.encode('latin-1'))
+    n = i36(i)
     if n < 0: n += len(x) + 1
     if n < 0 or n > len(x):
         return None
@@ -225,7 +208,7 @@ def e(x, i):
 FUNCTS['e'] = e
 def three(x, i):
     if len(i) < 2: return None
-    n = c_i36(i[0].encode('latin-1'))
+    n = i36(i[0])
     separator = i[1]
     parts = x.split(separator)
     if n < 0: n += len(parts)
@@ -234,66 +217,206 @@ def three(x, i):
     return separator.join(parts)
 FUNCTS['3'] = three
 
-def _parse_rule(rule_str):
-    rules = []
-    i = 0
-    while i < len(rule_str):
-        char = rule_str[i]
-        if char in "ludtrf{}qkK":
-            rules.append((char, ""))
-            i += 1
-        elif char in "$^":
-            if i + 1 < len(rule_str):
-                rules.append((char, rule_str[i+1]))
-                i += 2
-            else:
-                return None
-        elif char in "CcE":
-            rules.append((char, ""))
-            i += 1
-        elif char in "[]":
-            rules.append((char, ""))
-            i += 1
-        elif char in "opsx*+-.yY@":
-            if i + 2 <= len(rule_str):
-                rules.append((char, rule_str[i+1:i+3]))
-                i += 3
-            else:
-                return None
-        elif char in "D'LRTZz":
-            if i + 1 < len(rule_str):
-                rules.append((char, rule_str[i+1]))
-                i += 2
-            else:
-                return None
-        elif char == 'e':
-            if i + 2 <= len(rule_str):
-                rules.append((char, rule_str[i+1]))
-                i += 2
-            else:
-                return None
-        elif char == '3':
-            if i + 2 <= len(rule_str):
-                rules.append((char, rule_str[i+1:i+3]))
-                i += 3
-            else:
-                return None
-        else:
+cdef class RuleEngine:
+    cpdef apply_rule(self, str rule_str, str word):
+        cdef list parsed_rule = self._parse_rule(rule_str)
+        if parsed_rule is None:
             return None
-    return rules
+        
+        cdef str current_word = word
+        cdef tuple function
+        for function in parsed_rule:
+            if current_word is None:
+                return None
+            try:
+                current_word = FUNCTS[function[0]](current_word, function[1])
+            except (IndexError, ValueError, TypeError):
+                return None
+        return current_word
 
-def apply_rule(parsed_rule, word):
-    current_word = word
-    for function in parsed_rule:
-        if current_word is None:
-            return None
-        try:
-            current_word = FUNCTS[function[0]](current_word, function[1])
-        except (IndexError, ValueError, TypeError):
-            return None
-    return current_word
+    cdef list _parse_rule(self, str rule_str):
+        cdef list rules = []
+        cdef int i = 0
+        cdef int length = len(rule_str)
+        cdef str char
+        cdef str arg1
+        cdef str arg2
+        while i < length:
+            char = rule_str[i]
+            if char in "ludtrf{}qkK":
+                rules.append((char, ""))
+                i += 1
+            elif char in "$^":
+                if i + 1 < length:
+                    rules.append((char, rule_str[i+1]))
+                    i += 2
+                else:
+                    return None
+            elif char in "CcE":
+                rules.append((char, ""))
+                i += 1
+            elif char in "[]":
+                rules.append((char, ""))
+                i += 1
+            elif char in "opsx*+-.yY":
+                if i + 2 <= length:
+                    rules.append((char, rule_str[i+1:i+3]))
+                    i += 3
+                else:
+                    return None
+            elif char in "D'LRTZz":
+                if i + 1 < length:
+                    rules.append((char, rule_str[i+1]))
+                    i += 2
+                else:
+                    return None
+            elif char in "@":
+                if i + 1 < length:
+                    rules.append((char, rule_str[i+1]) if i + 1 < length else None)
+                    i += 2
+                else:
+                    return None
+            elif char == 'e':
+                if i + 2 <= length:
+                    rules.append((char, rule_str[i+1]))
+                    i += 2
+                else:
+                    return None
+            elif char == '3':
+                if i + 2 <= length:
+                    rules.append((char, rule_str[i+1:i+3]))
+                    i += 3
+                else:
+                    return None
+            else:
+                return None
+        return rules
 
-def generate_and_parse_rules():
+def simplify_rules(rules):
+    simplified = Counter()
+    for rule, count in rules.items():
+        # Check for T0T0 redundant rules
+        if 'T0T0' in rule:
+            rule = rule.replace('T0T0', '')
+        
+        # Check for '' redundant rules
+        if rule == "''":
+            rule = ""
+        
+        # If the rule becomes empty after simplification, replace it with ':'
+        if not rule:
+            rule = ":"
+        
+        simplified[rule] += count
+    return simplified
+
+def process_word_optimized(args):
+    """
+    Optimization of rule extraction using caching.
+    Builds rule chains iteratively, avoiding redundant calculations.
+    """
+    word, rules, target_set, rule_engine, chain_depth = args
+    found_rules_local = Counter()
+    
+    # Dictionary to store intermediate words and the rule chains that lead to them
+    # Format: { resulting_word: [list_of_rule_chains] }
+    intermediate_results = {word: [""]} # Initial state: base word with an empty chain
+    
+    for depth in range(1, chain_depth + 1):
+        # New results that will serve as the base for the next depth
+        new_intermediate_results = {}
+        for prev_word, rule_chains in intermediate_results.items():
+            for rule in rules:
+                transformed_word = rule_engine.apply_rule(rule, prev_word)
+                if transformed_word is not None and transformed_word not in new_intermediate_results:
+                    # Create a new, full rule chain
+                    for prev_chain in rule_chains:
+                        new_chain = prev_chain + rule
+                        
+                        # Check if the newly transformed word is in the target set
+                        if transformed_word != word and transformed_word in target_set:
+                            found_rules_local[new_chain] += 1
+                        
+                        # Add the result to the cache for the next level
+                        if transformed_word not in new_intermediate_results:
+                            new_intermediate_results[transformed_word] = []
+                        new_intermediate_results[transformed_word].append(new_chain)
+        
+        intermediate_results = new_intermediate_results
+
+    return found_rules_local
+
+cpdef load_data(str filename):
+    if not os.path.exists(filename):
+        print(f"Error: The file '{filename}' does not exist.")
+        return None
+    try:
+        with open(filename, 'r', encoding='latin-1') as f:
+            return [line.strip() for line in f if line.strip()]
+    except Exception as e:
+        print(f"An error occurred while loading the file '{filename}': {e}")
+        return None
+
+cpdef encode_non_ascii_to_hex(str rule):
+    cdef str hex_encoded_rule = ""
+    cdef str char
+    try:
+        rule.encode('ascii')
+        return rule
+    except UnicodeEncodeError:
+        for char in rule:
+            if char in "ludtrf{}q[]CcE$":
+                hex_encoded_rule += char
+            else:
+                hex_encoded_rule += "".join([f"\\x{ord(byte):02x}" for byte in char.encode('latin-1')])
+        return hex_encoded_rule
+
+def main():
+    parser = argparse.ArgumentParser(description='Hashcat rule extractor based on example passwords.')
+    parser.add_argument('-b', '--base-words', help='Path to the file with base words (required unless --autobase is used).')
+    parser.add_argument('-t', '--target-passwords', required=True, help='Path to the file with target passwords.')
+    parser.add_argument('-o', '--output-file', default='extracted_rules.rule', help='Path to the output file for the rules. Default: extracted_rules.rule')
+    parser.add_argument('--chain-depth', type=int, default=1, help='Number of rules to chain together. Use with caution. Default: 1 (single rules)')
+    parser.add_argument('--autobase', action='store_true', help='Automatically generate base words from the target list (memory-intensive).')
+    
+    args = parser.parse_args()
+
+    print("--- Hashcat Rule Extractor ---")
+    
+    if args.autobase:
+        print("Mode: Autobase (generating base words from the target list)")
+        print("WARNING: The --autobase option loads the entire target file into RAM, which can consume a large amount of memory on larger files.")
+    
+    if args.chain_depth > 1:
+        print(f"Mode: Chain Extraction (Depth: {args.chain_depth})")
+        print("WARNING: A caching optimization has been applied. This mode consumes significantly more RAM but runs much faster than the standard version.")
+    
+    print("-----------------------------------------------------")
+
+    if not args.autobase and not args.base_words:
+        parser.error('argument -b/--base-words is required unless --autobase is specified.')
+
+    # Load target passwords first, as they are needed in both modes
+    target_passwords = load_data(args.target_passwords)
+    if target_passwords is None:
+        return
+    
+    target_set = set(target_passwords)
+    
+    if args.autobase:
+        # Generate base_words from target_passwords
+        print("Generating base words from the target list...")
+        base_words = [word for word in target_passwords if word.isalpha()]
+    else:
+        # Load base_words from the specified file
+        base_words = load_data(args.base_words)
+    
+    if base_words is None:
+        return
+        
+    print(f"Loaded {len(base_words)} base words.")
+    print(f"Loaded {len(target_passwords)} target passwords.")
+    
     simple_rules = set()
     simple_rules.add(':')
     simple_rules.update(['l', 'u', 'c', 'C', 't', 'r', 'f', 'd', 'q', '{', '}', '[', ']', 'k', 'K', 'E'])
@@ -302,10 +425,13 @@ def generate_and_parse_rules():
     for i in range(1, 4): simple_rules.add(']' * i)
     for i in range(1, 4): simple_rules.add('[' * i)
     
-    replacements = {'a':'@', 'e':'3', 'i':'1', 'o':'0', 's':'$'}
-    for k, v in replacements.items():
-        simple_rules.add(f"s{k}{v}")
+    rule_engine = RuleEngine()
     
+    chars_to_test = string.digits + string.ascii_letters + string.punctuation
+    for char in chars_to_test:
+        simple_rules.add(f"${char}")
+        simple_rules.add(f"^{char}")
+        
     positions = [str(i) for i in range(16)]
     for pos in positions:
         simple_rules.add(f"T{pos}")
@@ -321,226 +447,32 @@ def generate_and_parse_rules():
         simple_rules.add(f"Y{pos}")
         simple_rules.add(f"z{pos}")
         simple_rules.add(f"Z{pos}")
-
+    
+    replacements = {'a':'@', 'e':'3', 'i':'1', 'o':'0', 's':'$'}
+    for k, v in replacements.items():
+        simple_rules.add(f"s{k}{v}")
+    
     for pos_a in positions:
         for pos_b in positions:
             if pos_a != pos_b:
                 simple_rules.add(f"*{pos_a}{pos_b}")
 
-    t0_rules = set()
-    for rule in simple_rules:
-        if rule != ':':
-            t0_rules.add(f"T0{rule}")
-    simple_rules.update(t0_rules)
-
-    extended_positions = ['0', '1', '2', '3', '-', '_', '<', '>']
-    specific_punctuation = '!@#$%^&*()_+-='
-    all_chars = string.digits + specific_punctuation
-    
-    for pos in extended_positions:
-        for char in all_chars:
-            simple_rules.add(f"i{pos}{char}")
-            simple_rules.add(f"o{pos}{char}")
-            simple_rules.add(f"s{pos}{char}")
-    
-    for pos in extended_positions:
-        simple_rules.add(f"T{pos}")
-        simple_rules.add(f"D{pos}")
-        simple_rules.add(f"'{pos}")
-        simple_rules.add(f"L{pos}")
-        simple_rules.add(f"R{pos}")
-        simple_rules.add(f"+{pos}")
-        simple_rules.add(f"-{pos}")
-        simple_rules.add(f".{pos}")
-        simple_rules.add(f",{pos}")
-        simple_rules.add(f"y{pos}")
-        simple_rules.add(f"Y{pos}")
-        simple_rules.add(f"z{pos}")
-        simple_rules.add(f"Z{pos}")
-
-    parsed_rules = []
-    for rule_str in sorted(list(simple_rules)):
-        parsed = _parse_rule(rule_str)
-        if parsed:
-            parsed_rules.append((rule_str, parsed))
-    
-    return parsed_rules
-
-def process_word(args):
-    word, parsed_rules, target_set, chains_mode = args
-    found_rules_local = Counter()
-    
-    if not chains_mode:
-        for rule_str, parsed_rule in parsed_rules:
-            transformed_word = apply_rule(parsed_rule, word)
-            if transformed_word and transformed_word != word and transformed_word in target_set:
-                found_rules_local[rule_str] += 1
-    else:
-        for rule1_str, parsed_rule1 in parsed_rules:
-            intermediate_word = apply_rule(parsed_rule1, word)
-            if intermediate_word:
-                for rule2_str, parsed_rule2 in parsed_rules:
-                    transformed_word = apply_rule(parsed_rule2, intermediate_word)
-                    if transformed_word and transformed_word != word and transformed_word in target_set:
-                        combined_rule = f"{rule1_str}{rule2_str}"
-                        found_rules_local[combined_rule] += 1
-                        
-    return found_rules_local
-
-def load_data(filename):
-    if not os.path.exists(filename):
-        print(f"Error: The file '{filename}' does not exist.")
-        return None
-        
-    try:
-        if filename.endswith('.gz'):
-            with gzip.open(filename, 'rt', encoding='latin-1') as f:
-                return [line.strip() for line in f if line.strip()]
-        elif filename.endswith('.zip'):
-            with zipfile.ZipFile(filename, 'r') as z:
-                first_file = z.namelist()[0]
-                with z.open(first_file) as f:
-                    return [line.decode('latin-1').strip() for line in f if line.strip()]
-        elif filename.endswith('.7z'):
-            if py7zr:
-                with py7zr.SevenZipFile(filename, 'r') as z:
-                    first_file = z.getnames()[0]
-                    with z.open(first_file, mode='r') as f:
-                        return [line.decode('latin-1').strip() for line in f if line.strip()]
-            else:
-                return None
-        else:
-            with open(filename, 'r', encoding='latin-1') as f:
-                return [line.strip() for line in f if line.strip()]
-
-    except Exception as e:
-        print(f"An error occurred while loading the file '{filename}': {e}")
-        return None
-
-def simplify_rules(rules):
-    simplified = Counter()
-    for rule, count in rules.items():
-        # Check for T0T0 redundant rules
-        if 'T0T0' in rule:
-            rule = rule.replace('T0T0', '')
-        
-        # Check for '' (apostrophe with empty parameter) redundant rules
-        # This one is tricky, it's not a common occurrence.
-        # This will be replaced by empty rule if the string is just ''
-        if rule == "''":
-            rule = ""
-        
-        # If the rule becomes empty after simplification, replace it with ':'
-        if not rule:
-            rule = ":"
-        
-        simplified[rule] += count
-    return simplified
-
-def encode_non_ascii_to_hex(rule):
-    try:
-        rule.encode('ascii')
-        return rule
-    except UnicodeEncodeError:
-        hex_encoded_rule = ""
-        for char in rule:
-            if char in "ludtrf{}q[]CcE$":
-                hex_encoded_rule += char
-            else:
-                hex_encoded_rule += "".join([f"\\x{ord(byte):02x}" for byte in char.encode('latin-1')])
-        return hex_encoded_rule
-
-def format_time(seconds):
-    minutes, seconds = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-def main():
-    parser = argparse.ArgumentParser(description='Hashcat rule extractor based on example passwords.')
-    parser.add_argument('-b', '--base-words', help='Path to the file with base words (required unless --autobase is used).')
-    parser.add_argument('-t', '--target-passwords', required=True, help='Path to the file with target passwords.')
-    parser.add_argument('-o', '--output-file', default='extracted_rules.rule', help='Path to the output file for the rules. Default: extracted_rules.rule')
-    parser.add_argument('--chains', action='store_true', help='Enable rule chain extraction (slower, but finds more rules).')
-    parser.add_argument('--autobase', action='store_true', help='Automatically generate base words from the target list (memory-intensive).')
-    
-    args = parser.parse_args()
-
-    print("--- Hashcat Rule Extractor v2.0 ---")
-    print(f"Analyzing files: '{args.base_words}' and '{args.target_passwords}'")
-    if args.autobase:
-        print("Mode: Autobase (generating base words from target list)")
-        print("Warning: The --autobase option loads the entire target file into RAM. It will consume a large amount of memory on larger files.")
-    if args.chains:
-        print("Mode: Chain Extraction")
-        print("Warning: This mode is intended for use with very small files due to its computational complexity.")
-    else:
-        print("Mode: Single Rule Extraction (default)")
-    print("-----------------------------------------------------")
-
-    if not args.autobase and not args.base_words:
-        parser.error('argument -b/--base-words is required unless --autobase is specified.')
-
-    # Load target passwords first, as they are needed for both modes
-    target_passwords = load_data(args.target_passwords)
-    if target_passwords is None:
-        return
-    target_set = set(target_passwords)
-    
-    if args.autobase:
-        # Generate base_words from target_passwords in memory
-        print("Generating base words from target list...")
-        base_words = [word for word in target_passwords if word.isalpha()]
-        print(f"Generated {len(base_words)} base words.")
-    else:
-        # Load base_words from the specified file
-        base_words = load_data(args.base_words)
-        if base_words is None:
-            return
-
-    print("Generating and parsing all rules once...")
-    start_time = time.time()
-    parsed_rules = generate_and_parse_rules()
-    end_time = time.time()
-    print(f"Completed in {end_time - start_time:.2f} seconds. Generated {len(parsed_rules)} unique rules.")
-
+    print(f"Generated a set of {len(simple_rules)} rules for testing.")
     print("Starting rule extraction...")
+
+    task_args = [(word, list(simple_rules), target_set, rule_engine, args.chain_depth) for word in base_words]
+    
+    found_rules = Counter()
     
     num_processes = cpu_count()
     print(f"Using {num_processes} processes for parallel processing.")
     
-    start_time = time.time()
-    processed_count = 0
-    total_items = len(base_words)
-
-    print("This may take a while...")
-
-    task_args = [(word, parsed_rules, target_set, args.chains) for word in base_words]
-    
-    found_rules = Counter()
-    
+    # We use the new, optimized function
     with Pool(processes=num_processes) as p:
-        results_iterator = p.imap_unordered(process_word, task_args, chunksize=100)
+        results = p.imap_unordered(process_word_optimized, task_args, chunksize=100)
         
-        for result in results_iterator:
+        for result in tqdm(results, total=len(base_words), desc="Processing words"):
             found_rules.update(result)
-            processed_count += 1
-            
-            elapsed_time = time.time() - start_time
-            if elapsed_time == 0:
-                items_per_sec = 0
-                eta_str = 'N/A'
-            else:
-                items_per_sec = processed_count / elapsed_time
-                remaining_items = total_items - processed_count
-                eta_seconds = remaining_items / items_per_sec
-                eta_str = format_time(eta_seconds)
-                
-            elapsed_str = format_time(elapsed_time)
-            
-            sys.stdout.write(f"\rProcessed: {processed_count}/{total_items} | Elapsed: {elapsed_str} | ETA: {eta_str} | Speed: {items_per_sec:.2f} words/s")
-            sys.stdout.flush()
-
-    print("\n")
 
     print("-----------------------------")
     if not found_rules:
@@ -548,7 +480,7 @@ def main():
         return
     
     print(f"Found {len(found_rules)} unique rules.")
-    
+
     simplified_rules = simplify_rules(found_rules)
     print(f"Simplified rules down to {len(simplified_rules)} unique rules.")
 
@@ -560,15 +492,12 @@ def main():
 
     try:
         with open(args.output_file, 'w', encoding='utf-8') as f:
-            for rule_str, count in simplified_rules.most_common():
-                hex_rule = encode_non_ascii_to_hex(rule_str)
+            for rule, count in simplified_rules.most_common():
+                hex_rule = encode_non_ascii_to_hex(rule)
                 f.write(f"{hex_rule}\n")
         print(f"All simplified rules, sorted by frequency, were successfully saved to the file '{args.output_file}'.")
-        print("Tip: You may need to use the 'cleanup-rules.bin' utility from hashcat-utils to remove any rules that are incompatible with your specific version of Hashcat.")
     except IOError as e:
         print(f"An error occurred while writing to the file: {e}")
         
 if __name__ == "__main__":
     main()
-
-
