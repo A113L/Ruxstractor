@@ -3,8 +3,6 @@
 
 # ruxstractor-v1.2.6.pyx
 
-# distutils: extra_compile_args=-O3
-# distutils: language=c
 import os
 import argparse
 import sys
