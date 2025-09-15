@@ -1,8 +1,7 @@
+# ruxstractor-v1.2.pyx
+
 # distutils: extra_compile_args=-O3
 # distutils: language=c
-
-# ruxstractor-v1.2.6.pyx
-
 import os
 import argparse
 import sys
@@ -10,6 +9,7 @@ import string
 import itertools
 import numpy as np
 import tempfile
+import subprocess
 from tqdm import tqdm
 from collections import Counter
 from multiprocessing import Pool, cpu_count
@@ -550,6 +550,8 @@ def main():
     parser.add_argument('--depth-range', default='1-1', help='Range of Levenshtein distances to find rules for, e.g., "1-5". Default: "1-1"')
     parser.add_argument('--autobase', action='store_true', help='Automatically generate base words from the target list (memory-intensive).')
     parser.add_argument('--in-memory', action='store_true', help='Use RAM for all processing. Faster for small datasets but memory-intensive.')
+    parser.add_argument('--cleanup-tool', help='Path to cleanup-rules.bin to post-process the rules.')
+    parser.add_argument('--cleaned-output', help='File to save the cleaned rules to. Requires --cleanup-tool.')
     
     args = parser.parse_args()
 
@@ -575,7 +577,7 @@ def main():
     print(f"Mode: Levenshtein Rule Extraction (Depth Range: {start_depth}-{end_depth})")
     
     if args.in_memory:
-        print("Using memory-optimized mode (--in-memory). This is faster but may consume a lot of RAM.")
+        print("Using memory-intensive mode (--in-memory). This is faster but may consume a lot of RAM.")
     else:
         print("Using file-based mode (default). This is slower but very low on RAM usage.")
 
@@ -684,16 +686,31 @@ def main():
     
     print("\n-----------------------------")
 
+    # Step to save the extracted rules
     try:
         with open(args.output_file, 'w', encoding='utf-8') as f:
             for rule, count in simplified_rules.most_common():
                 hex_rule = encode_non_ascii_to_hex(rule)
                 f.write(f"{hex_rule}\n")
-        print(f"All simplified rules, sorted by frequency, were successfully saved to the file '{args.output_file}'.")
+        print(f"All simplified rules were successfully saved to the file '{args.output_file}'.")
     except IOError as e:
         print(f"An error occurred while writing to the file: {e}")
         
+    # New section: Post-process with cleanup-rules.bin
+    if args.cleanup_tool and args.cleaned_output:
+        print("\n--- Running cleanup-rules.bin for GPU compatibility ---")
+        input_file = args.output_file
+        output_file = args.cleaned_output
+        try:
+            with open(input_file, 'r', encoding='utf-8') as infile, open(output_file, 'w', encoding='utf-8') as outfile:
+                subprocess.run([args.cleanup_tool, '2'], stdin=infile, stdout=outfile, check=True)
+            print(f"Successfully cleaned rules and saved to '{output_file}'.")
+        except FileNotFoundError:
+            print(f"Error: The cleanup tool '{args.cleanup_tool}' was not found. Please check the path.")
+        except subprocess.CalledProcessError as e:
+            print(f"Error: The cleanup tool '{args.cleanup_tool}' failed with exit code {e.returncode}.")
+        except Exception as e:
+            print(f"An unexpected error occurred during cleanup: {e}")
+        
 if __name__ == "__main__":
     main()
-
-
