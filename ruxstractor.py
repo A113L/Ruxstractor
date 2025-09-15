@@ -1,17 +1,204 @@
 #!/usr/bin/env python3
 
+# ruxstractor-v2.0.pyx
+
+# distutils: extra_compile_args=-O3
+# distutils: language=c
 import os
 import argparse
+import sys
+import string
+import itertools
+import numpy as np
 from tqdm import tqdm
 from collections import Counter
-import string
 from multiprocessing import Pool, cpu_count
 
+# The following Cython imports are used for C-level optimization.
+from cython.cimports.libc.stdlib import strtol
+from cython.cimports.libc.string import strlen
+
+# This is a Python wrapper, the C-optimized version is below.
 def i36(s):
     try:
         return int(s, 36)
     except (ValueError, IndexError):
         return -1
+
+cpdef int c_i36(bytes s):
+    cdef long val = 0
+    cdef char* endptr
+    val = strtol(s, &endptr, 36)
+    if endptr[0] != b'\0':
+        return -1
+    return val
+
+# --- Levenshtein Algorithm and Rule Generation (New Cython-optimized section) ---
+
+cdef int[:, :] levenshtein_matrix(str s1, str s2):
+    """
+    Calculates the Levenshtein distance matrix between two strings.
+    This implementation is optimized for Cython.
+    """
+    cdef int len1 = len(s1)
+    cdef int len2 = len(s2)
+    cdef int i, j, insertions, deletions, substitutions
+
+    cdef int[:, :] matrix = np.zeros((len1 + 1, len2 + 1), dtype=np.int32)
+
+    for i in range(len1 + 1):
+        matrix[i, 0] = i
+    for j in range(len2 + 1):
+        matrix[0, j] = j
+
+    for i in range(1, len1 + 1):
+        for j in range(1, len2 + 1):
+            insertions = matrix[i, j - 1] + 1
+            deletions = matrix[i - 1, j] + 1
+            substitutions = matrix[i - 1, j - 1] + (s1[i - 1] != s2[j - 1])
+            matrix[i, j] = min(insertions, deletions, substitutions)
+    
+    return matrix
+
+cdef list levenshtein_reverse_recursive(int[:, :] matrix, int i, int j, int path_len, int max_dist):
+    """
+    Recursively finds all shortest paths from the end of the matrix to the start.
+    This is a recursive function, so Python objects are used for the path list.
+    """
+    # Cython fix: All cdef declarations must be at the top of the function
+    cdef int cost = matrix[i, j]
+    cdef long cost_delete = sys.maxsize # Changed from int to long
+    cdef long cost_insert = sys.maxsize # Changed from int to long
+    cdef long cost_equal_or_replace = sys.maxsize # Changed from int to long
+    cdef long cost_min # Changed from int to long
+
+    if (i == 0 and j == 0) or path_len > max_dist:
+        return [[]]
+    else:
+        paths = []
+        
+        if i > 0:
+            cost_insert = matrix[i - 1, j]
+        if j > 0:
+            cost_delete = matrix[i, j - 1]
+        if i > 0 and j > 0:
+            cost_equal_or_replace = matrix[i - 1, j - 1]
+        
+        cost_min = min(cost_delete, cost_insert, cost_equal_or_replace)
+        
+        if cost_insert == cost_min:
+            insert_paths = levenshtein_reverse_recursive(matrix, i - 1, j, path_len + 1, max_dist)
+            for p in insert_paths:
+                paths.append(p + [('insert', i, j)])
+
+        if cost_delete == cost_min:
+            delete_paths = levenshtein_reverse_recursive(matrix, i, j - 1, path_len + 1, max_dist)
+            for p in delete_paths:
+                paths.append(p + [('delete', i, j)])
+
+        if cost_equal_or_replace == cost_min:
+            if cost_equal_or_replace == cost:
+                equal_paths = levenshtein_reverse_recursive(matrix, i - 1, j - 1, path_len, max_dist)
+                for p in equal_paths:
+                    paths.append(p)
+            else:
+                replace_paths = levenshtein_reverse_recursive(matrix, i - 1, j - 1, path_len + 1, max_dist)
+                for p in replace_paths:
+                    paths.append(p + [('replace', i, j)])
+
+        return paths
+
+cpdef str int_to_hashcat(int n):
+    """
+    Converts an integer position to a hashcat character representation.
+    """
+    if 0 <= n < 10:
+        return str(n)
+    elif 10 <= n < 36:
+        return chr(65 + n - 10)
+    else:
+        return ""
+
+def generate_rules_from_path(str word, str password, list path):
+    """
+    Generates a hashcat-compatible rule string from a Levenshtein path.
+    """
+    rules = []
+    
+    # Simple, non-positional rules (l, u, c, C, t, r)
+    if password == word.lower():
+        rules.append('l')
+        word = password
+    elif password == word.upper():
+        rules.append('u')
+        word = password
+    elif password == word.capitalize():
+        rules.append('c')
+        word = password
+    elif password == word.swapcase():
+        rules.append('t')
+        word = password
+    elif password == word[::-1]:
+        rules.append('r')
+        word = password
+        
+    for op, r, c in path:
+        if op == 'insert':
+            rules.append(f'i{int_to_hashcat(c-1)}{password[c-1]}')
+        elif op == 'delete':
+            rules.append(f'D{int_to_hashcat(r-1)}')
+        elif op == 'replace':
+            pos_w = r - 1
+            pos_p = c - 1
+            if word[pos_w].islower() and password[pos_p].isupper():
+                rules.append(f'T{int_to_hashcat(pos_w)}')
+            elif word[pos_w].isupper() and password[pos_p].islower():
+                rules.append(f'T{int_to_hashcat(pos_w)}')
+            elif word[pos_w].isalpha() and password[pos_p].isalpha() and word[pos_w].lower() == password[pos_p].lower():
+                rules.append(f's{word[pos_w]}{password[pos_p]}')
+            else:
+                rules.append(f'o{int_to_hashcat(pos_w)}{password[pos_p]}')
+
+    # Remove duplicates and simplify rule chains
+    simplified_rules = []
+    for rule in rules:
+        if rule in ['l', 'u', 'c', 't', 'r']:
+            if rule not in simplified_rules:
+                simplified_rules.insert(0, rule)
+        else:
+            simplified_rules.append(rule)
+
+    return "".join(simplified_rules)
+
+# This worker function is now simpler, as it just calls the core Levenshtein functions
+cpdef find_rules_worker(tuple args):
+    """
+    A worker function to find rules for a given pair of words using Levenshtein.
+    """
+    cdef str base = args[0]
+    cdef str target = args[1]
+    cdef int max_depth = args[2]
+
+    if not base or not target or base == target:
+        return None
+
+    matrix = levenshtein_matrix(base, target)
+    if matrix[len(base), len(target)] > max_depth:
+        return None
+
+    paths = levenshtein_reverse_recursive(matrix, len(base), len(target), 0, max_depth)
+    
+    if not paths:
+        return None
+
+    paths.sort(key=len)
+    shortest_path = paths[0]
+    
+    rule_string = generate_rules_from_path(base, target, shortest_path)
+
+    return rule_string
+
+# --- Rest of the script (maintained from previous version) ---
 
 FUNCTS = {}
 FUNCTS[':'] = lambda x, i: x
@@ -25,7 +212,10 @@ FUNCTS['C'] = C
 FUNCTS['t'] = lambda x, i: x.swapcase()
 def T(x, i):
     number = i36(i)
-    if number < 0 or number >= len(x): return None
+    if number < 0:
+        number += len(x)
+    if number < 0 or number >= len(x):
+        return None
     return ''.join((x[:number], x[number].swapcase(), x[number + 1:]))
 FUNCTS['T'] = T
 FUNCTS['r'] = lambda x, i: x[::-1]
@@ -44,7 +234,10 @@ FUNCTS['['] = lambda x, i: x[1:]
 FUNCTS[']'] = lambda x, i: x[:-1]
 def D(x, i):
     number = i36(i)
-    if number < 0 or number >= len(x): return None
+    if number < 0:
+        number += len(x)
+    if number < 0 or number >= len(x):
+        return None
     return x[:number] + x[number+1:]
 FUNCTS['D'] = D
 def x_ext(x, i):
@@ -65,19 +258,28 @@ def i_ins(x, i):
     if len(i) != 2: return None
     n = i36(i[0])
     char = i[1]
-    if n < 0 or n > len(x): return None
+    if n < 0:
+        n += len(x) + 1
+    if n < 0 or n > len(x):
+        return None
     return x[:n] + char + x[n:]
 FUNCTS['i'] = i_ins
 def o_ovw(x, i):
     if len(i) != 2: return None
     n = i36(i[0])
     char = i[1]
-    if n < 0 or n >= len(x): return None
+    if n < 0:
+        n += len(x)
+    if n < 0 or n >= len(x):
+        return None
     return x[:n] + char + x[n+1:]
 FUNCTS['o'] = o_ovw
 def apostrophe(x, i):
     n = i36(i)
-    if n < 0 or n > len(x): return None
+    if n < 0:
+        n += len(x) + 1
+    if n < 0 or n > len(x):
+        return None
     return x[:n]
 FUNCTS["'"] = apostrophe
 FUNCTS['s'] = lambda x, i: x.replace(i[0], i[1]) if len(i) == 2 else None
@@ -103,13 +305,17 @@ def star(x, i):
     if len(i) != 2: return None
     n = i36(i[0])
     m = i36(i[1])
-    if n < 0 or m < 0 or n >= len(x) or m >= len(x): return None
+    if n < 0 or m < 0: return None
+    if n < 0: n += len(x)
+    if m < 0: m += len(x)
+    if n >= len(x) or m >= len(x): return None
     chars = list(x)
     chars[n], chars[m] = chars[m], chars[n]
     return ''.join(chars)
 FUNCTS['*'] = star
 def L(x, i):
     n = i36(i)
+    if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     shifted_val = char_val << 1
@@ -117,6 +323,7 @@ def L(x, i):
 FUNCTS['L'] = L
 def R(x, i):
     n = i36(i)
+    if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     shifted_val = char_val >> 1
@@ -124,36 +331,44 @@ def R(x, i):
 FUNCTS['R'] = R
 def plus(x, i):
     n = i36(i)
+    if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     return x[:n] + chr(char_val + 1) + x[n+1:]
 FUNCTS['+'] = plus
 def minus(x, i):
     n = i36(i)
+    if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     return x[:n] + chr(char_val - 1) + x[n+1:]
 FUNCTS['-'] = minus
 def dot(x, i):
     n = i36(i)
+    if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     return x[:n] + chr(char_val + 1) + x[n+1:]
 FUNCTS['.'] = dot
 def comma(x, i):
     n = i36(i)
+    if n < 0: n += len(x)
     if n < 0 or n >= len(x): return None
     char_val = ord(x[n])
     return x[:n] + chr(char_val - 1) + x[n+1:]
 FUNCTS[','] = comma
 def y(x, i):
     n = i36(i)
-    if n < 0 or n > len(x): return None
+    if n < 0: n += len(x) + 1
+    if n < 0 or n > len(x):
+        return None
     return x[:n] + x
 FUNCTS['y'] = y
 def Y(x, i):
     n = i36(i)
-    if n < 0 or n > len(x): return None
+    if n < 0: n += len(x) + 1
+    if n < 0 or n > len(x):
+        return None
     return x + x[-n:]
 FUNCTS['Y'] = Y
 def E(x, i):
@@ -168,19 +383,20 @@ def three(x, i):
     n = i36(i[0])
     separator = i[1]
     parts = x.split(separator)
+    if n < 0: n += len(parts)
     if n < 0 or n >= len(parts): return None
     parts[n] = parts[n].swapcase()
     return separator.join(parts)
 FUNCTS['3'] = three
 
-
-class RuleEngine(object):
-    def apply_rule(self, rule_str, word):
-        parsed_rule = self._parse_rule(rule_str)
+cdef class RuleEngine:
+    cpdef apply_rule(self, str rule_str, str word):
+        cdef list parsed_rule = self._parse_rule(rule_str)
         if parsed_rule is None:
             return None
-            
-        current_word = word
+        
+        cdef str current_word = word
+        cdef tuple function
         for function in parsed_rule:
             if current_word is None:
                 return None
@@ -190,16 +406,20 @@ class RuleEngine(object):
                 return None
         return current_word
 
-    def _parse_rule(self, rule_str):
-        rules = []
-        i = 0
-        while i < len(rule_str):
+    cdef list _parse_rule(self, str rule_str):
+        cdef list rules = []
+        cdef int i = 0
+        cdef int length = len(rule_str)
+        cdef str char
+        cdef str arg1
+        cdef str arg2
+        while i < length:
             char = rule_str[i]
             if char in "ludtrf{}qkK":
                 rules.append((char, ""))
                 i += 1
             elif char in "$^":
-                if i + 1 < len(rule_str):
+                if i + 1 < length:
                     rules.append((char, rule_str[i+1]))
                     i += 2
                 else:
@@ -211,31 +431,31 @@ class RuleEngine(object):
                 rules.append((char, ""))
                 i += 1
             elif char in "opsx*+-.yY":
-                if i + 2 <= len(rule_str):
+                if i + 2 <= length:
                     rules.append((char, rule_str[i+1:i+3]))
                     i += 3
                 else:
                     return None
             elif char in "D'LRTZz":
-                if i + 1 < len(rule_str):
+                if i + 1 < length:
                     rules.append((char, rule_str[i+1]))
                     i += 2
                 else:
                     return None
             elif char in "@":
-                if i + 1 < len(rule_str):
-                    rules.append((char, rule_str[i+1]))
+                if i + 1 < length:
+                    rules.append((char, rule_str[i+1]) if i + 1 < length else None)
                     i += 2
                 else:
                     return None
             elif char == 'e':
-                if i + 2 <= len(rule_str):
+                if i + 2 <= length:
                     rules.append((char, rule_str[i+1]))
                     i += 2
                 else:
                     return None
             elif char == '3':
-                if i + 2 <= len(rule_str):
+                if i + 2 <= length:
                     rules.append((char, rule_str[i+1:i+3]))
                     i += 3
                 else:
@@ -244,29 +464,22 @@ class RuleEngine(object):
                 return None
         return rules
 
+def simplify_rules(rules):
+    simplified = Counter()
+    for rule, count in rules.items():
+        if 'T0T0' in rule:
+            rule = rule.replace('T0T0', '')
+        
+        if rule == "''":
+            rule = ""
+        
+        if not rule:
+            rule = ":"
+        
+        simplified[rule] += count
+    return simplified
 
-def process_word(args):
-    word, rules, target_set, rule_engine, chains_mode = args
-    found_rules_local = Counter()
-    
-    if not chains_mode:
-        for rule in rules:
-            transformed_word = rule_engine.apply_rule(rule, word)
-            if transformed_word and transformed_word != word and transformed_word in target_set:
-                found_rules_local[rule] += 1
-    else:
-        for rule1 in rules:
-            intermediate_word = rule_engine.apply_rule(rule1, word)
-            if intermediate_word:
-                for rule2 in rules:
-                    transformed_word = rule_engine.apply_rule(rule2, intermediate_word)
-                    if transformed_word and transformed_word != word and transformed_word in target_set:
-                        combined_rule = f"{rule1}{rule2}"
-                        found_rules_local[combined_rule] += 1
-                        
-    return found_rules_local
-
-def load_data(filename):
+cpdef load_data(str filename):
     if not os.path.exists(filename):
         print(f"Error: The file '{filename}' does not exist.")
         return None
@@ -277,12 +490,13 @@ def load_data(filename):
         print(f"An error occurred while loading the file '{filename}': {e}")
         return None
 
-def encode_non_ascii_to_hex(rule):
+cpdef encode_non_ascii_to_hex(str rule):
+    cdef str hex_encoded_rule = ""
+    cdef str char
     try:
         rule.encode('ascii')
         return rule
     except UnicodeEncodeError:
-        hex_encoded_rule = ""
         for char in rule:
             if char in "ludtrf{}q[]CcE$":
                 hex_encoded_rule += char
@@ -290,90 +504,72 @@ def encode_non_ascii_to_hex(rule):
                 hex_encoded_rule += "".join([f"\\x{ord(byte):02x}" for byte in char.encode('latin-1')])
         return hex_encoded_rule
 
-
 def main():
     parser = argparse.ArgumentParser(description='Hashcat rule extractor based on example passwords.')
-    parser.add_argument('-b', '--base-words', required=True, help='Path to the file with base words.')
+    parser.add_argument('-b', '--base-words', help='Path to the file with base words (required unless --autobase is used).')
     parser.add_argument('-t', '--target-passwords', required=True, help='Path to the file with target passwords.')
     parser.add_argument('-o', '--output-file', default='extracted_rules.rule', help='Path to the output file for the rules. Default: extracted_rules.rule')
-    parser.add_argument('--chains', action='store_true', help='Enable rule chain extraction (slower, but finds more rules).')
+    parser.add_argument('--chain-depth', type=int, default=1, help='Number of rules to chain together. Use with caution. Default: 1 (single rules)')
+    parser.add_argument('--autobase', action='store_true', help='Automatically generate base words from the target list (memory-intensive).')
     
     args = parser.parse_args()
 
-    print("--- Hashcat Rule Extractor (Final Version) ---")
-    print(f"Analyzing files: '{args.base_words}' and '{args.target_passwords}'")
-    if args.chains:
-        print("Mode: Chain Extraction (slower)")
-    else:
-        print("Mode: Single Rule Extraction (default)")
+    print("--- Hashcat Rule Extractor ---")
+    
+    if args.autobase:
+        print("Mode: Autobase (generating base words from the target list)")
+        print("WARNING: The --autobase option loads the entire target file into RAM, which can consume a large amount of memory on larger files.")
+    
+    if args.chain_depth > 1:
+        print(f"Mode: Levenshtein Rule Extraction (Depth: {args.chain_depth})")
+        print("WARNING: This mode consumes more RAM but runs much faster than the standard BFS version.")
+    
     print("-----------------------------------------------------")
 
-    base_words = load_data(args.base_words)
+    if not args.autobase and not args.base_words:
+        parser.error('argument -b/--base-words is required unless --autobase is specified.')
+
+    # Load target passwords first, as they are needed in both modes
     target_passwords = load_data(args.target_passwords)
-    
-    if base_words is None or target_passwords is None:
+    if target_passwords is None:
         return
-        
+    
     target_set = set(target_passwords)
     
-    special_chars = "!@#$%^&*()_+=-"
-    hex_letters = "abcdef"
+    if args.autobase:
+        # Generate base_words from target_passwords
+        print("Generating base words from the target list...")
+        base_words = [word for word in target_passwords if word.isalpha()]
+        tasks = [(base, target, args.chain_depth)
+                 for base, target in itertools.permutations(set(base_words), 2)
+                 if base != target]
+    else:
+        # Load base_words from the specified file
+        base_words = load_data(args.base_words)
+        tasks = [(base, target, args.chain_depth)
+                 for base, target in itertools.product(set(base_words), target_set)
+                 if base != target]
     
-    simple_rules = set()
-    simple_rules.add(':')
-    simple_rules.update(['l', 'u', 'c', 'C', 't', 'r', 'f', 'd', 'q', '{', '}', '[', ']', 'k', 'K', 'E'])
-    
-    for i in range(2, 5): simple_rules.add('p' + str(i))
-    for i in range(1, 4): simple_rules.add(']' * i)
-    for i in range(1, 4): simple_rules.add('[' * i)
-    
-    rule_engine = RuleEngine()
-    
-    chars_to_test = string.digits + hex_letters + special_chars
-    for char in chars_to_test:
-        simple_rules.add(f"${char}")
-        simple_rules.add(f"^{char}")
+    if base_words is None:
+        return
         
-    positions = [str(i) for i in range(16)]
-    for pos in positions:
-        simple_rules.add(f"T{pos}")
-        simple_rules.add(f"D{pos}")
-        simple_rules.add(f"'{pos}")
-        simple_rules.add(f"L{pos}")
-        simple_rules.add(f"R{pos}")
-        simple_rules.add(f"+{pos}")
-        simple_rules.add(f"-{pos}")
-        simple_rules.add(f".{pos}")
-        simple_rules.add(f",{pos}")
-        simple_rules.add(f"y{pos}")
-        simple_rules.add(f"Y{pos}")
-        simple_rules.add(f"z{pos}")
-        simple_rules.add(f"Z{pos}")
+    print(f"Loaded {len(base_words)} base words.")
+    print(f"Loaded {len(target_passwords)} target passwords.")
     
-    replacements = {'a':'@', 'e':'3', 'i':'1', 'o':'0', 's':'$'}
-    for k, v in replacements.items():
-        simple_rules.add(f"s{k}{v}")
-    
-    for pos_a in positions:
-        for pos_b in positions:
-            if pos_a != pos_b:
-                simple_rules.add(f"*{pos_a}{pos_b}")
-
-    print(f"Generated a core set of {len(simple_rules)} rules for testing.")
     print("Starting rule extraction...")
 
-    task_args = [(word, list(simple_rules), target_set, rule_engine, args.chains) for word in base_words]
-    
     found_rules = Counter()
     
     num_processes = cpu_count()
     print(f"Using {num_processes} processes for parallel processing.")
     
+    # We use the new, optimized function
     with Pool(processes=num_processes) as p:
-        results = p.imap_unordered(process_word, task_args, chunksize=100)
+        results = p.imap_unordered(find_rules_worker, tasks, chunksize=100)
         
-        for result in tqdm(results, total=len(base_words), desc="Processing words"):
-            found_rules.update(result)
+        for result in tqdm(results, total=len(tasks), desc="Processing words"):
+            if result:
+                found_rules[result] += 1
 
     print("-----------------------------")
     if not found_rules:
@@ -382,20 +578,24 @@ def main():
     
     print(f"Found {len(found_rules)} unique rules.")
 
+    simplified_rules = simplify_rules(found_rules)
+    print(f"Simplified rules down to {len(simplified_rules)} unique rules.")
+
     print("\n--- Top 10 Most Frequent Rules ---")
-    for rule, count in found_rules.most_common(10):
+    for rule, count in simplified_rules.most_common(10):
         print(f"  {rule:<15} (Occurrences: {count})")
     
     print("\n-----------------------------")
 
     try:
         with open(args.output_file, 'w', encoding='utf-8') as f:
-            for rule, count in found_rules.most_common():
+            for rule, count in simplified_rules.most_common():
                 hex_rule = encode_non_ascii_to_hex(rule)
                 f.write(f"{hex_rule}\n")
-        print(f"All rules, sorted by frequency, were successfully saved to the file '{args.output_file}'.")
+        print(f"All simplified rules, sorted by frequency, were successfully saved to the file '{args.output_file}'.")
     except IOError as e:
         print(f"An error occurred while writing to the file: {e}")
         
 if __name__ == "__main__":
     main()
+
