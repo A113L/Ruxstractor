@@ -1,6 +1,6 @@
 <h2>Welcome to Ruxstractor v1.2:</h2>
 
-**[![Preview](https://dai.ly/k6soryDAyMQbHZDQEgw)}**
+**[![Preview](https://dai.ly/k6soryDAyMQbHZDQEgw)]**
 
 1. Performance with Cython and Multiprocessing: Key functions, such as Levenshtein distance calculation, are optimized for speed. The script utilizes all available CPU cores, which significantly reduces the time required to generate rules for larger datasets.
 
