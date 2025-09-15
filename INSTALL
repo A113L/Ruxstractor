@@ -20,25 +20,4 @@ options:
   --autobase            Automatically generate base words from the target list (memory-intensive).
   --in-memory           Use RAM for all processing. Faster for small datasets but memory-intensive.
 
-
-
-# Python3
-python3 ruxstractor.py -h
-usage: ruxstractor.py [-h] -b BASE_WORDS -t TARGET_PASSWORDS [-o OUTPUT_FILE]
-                      [--chains]
-
-Hashcat rule extractor based on example passwords.
-
-options:
-  -h, --help            show this help message and exit
-  -b BASE_WORDS, --base-words BASE_WORDS
-                        Path to the file with base words.
-  -t TARGET_PASSWORDS, --target-passwords TARGET_PASSWORDS
-                        Path to the file with target passwords.
-  -o OUTPUT_FILE, --output-file OUTPUT_FILE
-                        Path to the output file for the rules. Default:
-                        extracted_rules.rule
-  --chains              Enable rule chain extraction (slower, but finds more
-                        rules).
-
 benchmark --> https://gist.github.com/A113L/62ba4502baee659d9256a4b0a24f99b7#file-gistfile1-txt
