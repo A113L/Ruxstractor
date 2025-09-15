@@ -3,26 +3,22 @@ python3 setup.py build_ext --inplace
 
 # Cython
 python3 run.py -h
-usage: run.py [-h] [-b BASE_WORDS] -t TARGET_PASSWORDS [-o OUTPUT_FILE]
-              [--chain-depth CHAIN_DEPTH] [--autobase]
+usage: run.py [-h] [-b BASE_WORDS] -t TARGET_PASSWORDS [-o OUTPUT_FILE] [--depth-range DEPTH_RANGE] [--autobase] [--in-memory]
 
 Hashcat rule extractor based on example passwords.
 
 options:
   -h, --help            show this help message and exit
   -b BASE_WORDS, --base-words BASE_WORDS
-                        Path to the file with base words (required unless
-                        --autobase is used).
+                        Path to the file with base words (required unless --autobase is used).
   -t TARGET_PASSWORDS, --target-passwords TARGET_PASSWORDS
                         Path to the file with target passwords.
   -o OUTPUT_FILE, --output-file OUTPUT_FILE
-                        Path to the output file for the rules. Default:
-                        extracted_rules.rule
-  --chain-depth CHAIN_DEPTH
-                        Number of rules to chain together. Use with caution.
-                        Default: 1 (single rules)
-  --autobase            Automatically generate base words from the target list
-                        (memory-intensive).
+                        Path to the output file for the rules. Default: extracted_rules.rule
+  --depth-range DEPTH_RANGE
+                        Range of Levenshtein distances to find rules for, e.g., "1-5". Default: "1-1"
+  --autobase            Automatically generate base words from the target list (memory-intensive).
+  --in-memory           Use RAM for all processing. Faster for small datasets but memory-intensive.
 
 
 
