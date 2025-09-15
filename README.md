@@ -72,7 +72,7 @@ Rule Engine: The core of the program is its built-in engine, which replicates a 
 *Rule Extraction: The program performs two main operations*
 
 - Single Rule Extraction: It tests every single rule from its built-in database against each base word. If a transformed word matches a password in the target list, the corresponding rule is logged.
-- Rule Chain Extraction (--chains): In chain mode, the program tests combinations of two rules (e.g., l + s/a/@). This is significantly slower but allows it to discover more complex and realistic password patterns that a single rule would miss, such as a capitalization and a substitution "P"assword" -> "p"assword" -> "p@ssword".
+- Rule Chain Extraction (--depth-range): In chain mode, the program tests combinations of two or more rules (e.g., l + s/a/@). This is little slower but allows it to discover more complex and realistic password patterns that a single rule would miss, such as a capitalization and a substitution "P"assword" -> "p"assword" -> "p@ssword".
 - Process Pool (Multiprocessing): The implementation of Python's multiprocessing module allows the program to distribute the task of processing base words across all available CPU cores. This is critical for performance, especially in --chains mode, where the number of operations is orders of magnitude higher.
 
 *Output and Compatibility*
