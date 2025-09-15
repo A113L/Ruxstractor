@@ -44,3 +44,5 @@ options:
                         extracted_rules.rule
   --chains              Enable rule chain extraction (slower, but finds more
                         rules).
+
+benchmark --> https://gist.github.com/A113L/62ba4502baee659d9256a4b0a24f99b7#file-gistfile1-txt
