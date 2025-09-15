@@ -334,7 +334,6 @@ def generate_and_parse_rules():
     simple_rules.update(t0_rules)
 
     extended_positions = ['0', '1', '2', '3', '-', '_', '<', '>']
-    # Zmieniona linijka: teraz zawiera tylko cyfry i podane znaki specjalne
     specific_punctuation = '!@#$%^&*()_+-='
     all_chars = string.digits + specific_punctuation
     
@@ -445,10 +444,11 @@ def main():
     
     args = parser.parse_args()
 
-    print("--- Hashcat Rule Extractor v1.5 ---")
+    print("--- Hashcat Rule Extractor v1.1 ---")
     print(f"Analyzing files: '{args.base_words}' and '{args.target_passwords}'")
     if args.chains:
-        print("Mode: Chain Extraction (extremely slow on large rule sets)")
+        print("Mode: Chain Extraction")
+        print("Warning: This mode is intended for use with very small files due to its computational complexity.")
     else:
         print("Mode: Single Rule Extraction (default)")
     print("-----------------------------------------------------")
@@ -525,8 +525,10 @@ def main():
                 hex_rule = encode_non_ascii_to_hex(rule_str)
                 f.write(f"{hex_rule}\n")
         print(f"All rules, sorted by frequency, were successfully saved to the file '{args.output_file}'.")
+        print("Tip: You may need to use the 'cleanup-rules.bin' utility from hashcat-utils to remove any rules that are incompatible with your specific version (CPU/GPU) of Hashcat.")
     except IOError as e:
         print(f"An error occurred while writing to the file: {e}")
         
 if __name__ == "__main__":
     main()
+
