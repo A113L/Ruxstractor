@@ -59,16 +59,6 @@ This program is a specialized offensive security tool designed for the automated
 
 The program operates on a comparison-based principle. It analyzes how words from one dataset (base words) have been transformed to become passwords in a second dataset (target passwords). For example, if "password" is a base word and "P@ssw0rd1" is a target password, the program identifies the sequence of rules that led to this transformation.
 
-*Key Components and Functionality*
-
-Rule Engine: The core of the program is its built-in engine, which replicates a wide range of transformations available in Hashcat. This includes simple operations like:
-
-- Case changes (l, u).
-- Character additions at the beginning or end (^, $).
-- Character substitutions (e.g., s for s/a/@, s/o/0).
-- Rotational shifts ({, }).
-- Rule composition.
-
 *Rule Extraction: The program performs two main operations*
 
 - Single Rule Extraction: It tests every single rule from its built-in database against each base word. If a transformed word matches a password in the target list, the corresponding rule is logged.
