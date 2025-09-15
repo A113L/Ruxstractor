@@ -417,6 +417,26 @@ def load_data(filename):
         print(f"An error occurred while loading the file '{filename}': {e}")
         return None
 
+def simplify_rules(rules):
+    simplified = Counter()
+    for rule, count in rules.items():
+        # Check for T0T0 redundant rules
+        if 'T0T0' in rule:
+            rule = rule.replace('T0T0', '')
+        
+        # Check for '' (apostrophe with empty parameter) redundant rules
+        # This one is tricky, it's not a common occurrence.
+        # This will be replaced by empty rule if the string is just ''
+        if rule == "''":
+            rule = ""
+        
+        # If the rule becomes empty after simplification, replace it with ':'
+        if not rule:
+            rule = ":"
+        
+        simplified[rule] += count
+    return simplified
+
 def encode_non_ascii_to_hex(rule):
     try:
         rule.encode('ascii')
@@ -445,7 +465,7 @@ def main():
     
     args = parser.parse_args()
 
-    print("--- Hashcat Rule Extractor v1.2 ---")
+    print("--- Hashcat Rule Extractor v2.0 ---")
     print(f"Analyzing files: '{args.base_words}' and '{args.target_passwords}'")
     if args.autobase:
         print("Mode: Autobase (generating base words from target list)")
@@ -528,19 +548,22 @@ def main():
         return
     
     print(f"Found {len(found_rules)} unique rules.")
+    
+    simplified_rules = simplify_rules(found_rules)
+    print(f"Simplified rules down to {len(simplified_rules)} unique rules.")
 
     print("\n--- Top 10 Most Frequent Rules ---")
-    for rule, count in found_rules.most_common(10):
+    for rule, count in simplified_rules.most_common(10):
         print(f"  {rule:<15} (Occurrences: {count})")
     
     print("\n-----------------------------")
 
     try:
         with open(args.output_file, 'w', encoding='utf-8') as f:
-            for rule_str, count in found_rules.most_common():
+            for rule_str, count in simplified_rules.most_common():
                 hex_rule = encode_non_ascii_to_hex(rule_str)
                 f.write(f"{hex_rule}\n")
-        print(f"All rules, sorted by frequency, were successfully saved to the file '{args.output_file}'.")
+        print(f"All simplified rules, sorted by frequency, were successfully saved to the file '{args.output_file}'.")
         print("Tip: You may need to use the 'cleanup-rules.bin' utility from hashcat-utils to remove any rules that are incompatible with your specific version of Hashcat.")
     except IOError as e:
         print(f"An error occurred while writing to the file: {e}")
