@@ -1,4 +1,4 @@
-<h2>Welcome to Ruxstractor v1.2:</h2>
+<h2>Welcome to Ruxstractor v1.2</h2>
 
 **[Preview](https://dai.ly/k6soryDAyMQbHZDQEgw)**
 
